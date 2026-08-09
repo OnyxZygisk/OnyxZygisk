@@ -9,10 +9,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <thread>
-
 #include <algorithm>
-#include <atomic>
 #include <string>
 #include <vector>
 
@@ -453,83 +450,12 @@ void ZygiskContext::app_specialize_post() {
     env->ReleaseStringUTFChars(args.app->nice_name, process);
 }
 
-/**
- * Hot-plug poller, running only inside system_server.
- *
- * Framework-level modules (LSPosed etc.) only take effect in system_server
- * itself, and the user forbids any zygote/system_server restart. So once per
- * poll interval we re-read the daemon's module list and load modules that
- * appeared since the last scan directly into the running system_server:
- * memfd-load + onLoad + preServerSpecialize (with fresh, safe args). App
- * processes already get hot-plugged modules on their next fork.
- */
-static void hotplug_poller(ZygiskContext *ctx, JavaVM *vm) {
-    std::vector<std::string> loaded;
-    for (;;) {
-        sleep(15);
-        auto ms = zygiskd::ReadModules();
-        if (ms.empty()) continue;
-
-        JNIEnv *penv = nullptr;
-        if (vm->GetEnv(reinterpret_cast<void **>(&penv), JNI_VERSION_1_6) != JNI_OK) {
-            // The poller thread has no JNI env yet; attach it (never detach —
-            // the env stays valid for the lifetime of the poller).
-            if (vm->AttachCurrentThread(&penv, nullptr) != JNI_OK) continue;
-        }
-
-        for (size_t i = 0; i < ms.size(); i++) {
-            auto &m = ms[i];
-            if (std::find(loaded.begin(), loaded.end(), m.name) != loaded.end()) continue;
-            if (LoadedModule lm = LoadModuleFromMemfd(m.memfd)) {
-                LOGI("hot-plug: loading module `%s` into system_server", m.name.c_str());
-                ctx->modules.emplace_back(static_cast<int>(i), lm.handle, lm.entry, lm.custom);
-                auto &mod = ctx->modules.back();
-                mod.onLoad(penv);
-                // preServerSpecialize with fresh args — the specialize-time
-                // argument struct is long gone. LSPosed-class modules only
-                // read the env; the values are sane defaults.
-                jint uid = 1000, gid = 1000, runtime_flags = 0;
-                jintArray gids = nullptr;
-                jlong caps = 0;
-                ServerSpecializeArgs_v1 args(uid, gid, gids, runtime_flags, caps, caps);
-                mod.preServerSpecialize(&args);
-                loaded.push_back(m.name);
-            }
-        }
-    }
-}
-
 void ZygiskContext::server_specialize_pre() {
     run_modules_pre();
     zygiskd::SystemServerStarted();
 }
 
-void ZygiskContext::server_specialize_post() {
-    run_modules_post();
-
-    // Start the hot-plug poller once (system_server only). No restart of any
-    // kind is involved: the module is loaded into the running process.
-    //
-    // This MUST run in _post, not _pre. server_specialize_pre() executes in
-    // the freshly forked child *before* the original nativeForkSystemServer
-    // reaches SpecializeCommon -> selinux_android_setcontext -> setcon().
-    // setcon() (writing /proc/self/attr/current) is rejected by the kernel
-    // for any process with more than one thread — the reason zygote is
-    // single-threaded by design. Spawning the poller thread in _pre left the
-    // child multi-threaded during that transition, so setcon() failed and
-    // zygote aborted (JNI FatalError, "selinux_android_setcontext ... failed")
-    // on every boot with a module opted in — a deterministic bootloop. By
-    // _post the SELinux context transition is already done, so an extra
-    // thread is harmless.
-    static std::atomic<bool> started{false};
-    if (!started.exchange(true)) {
-        JavaVM *vm = nullptr;
-        if (env->GetJavaVM(&vm) == JNI_OK && vm != nullptr) {
-            std::thread(hotplug_poller, this, vm).detach();
-            LOGI("hot-plug: system_server module poller started");
-        }
-    }
-}
+void ZygiskContext::server_specialize_post() { run_modules_post(); }
 
 // -----------------------------------------------------------------
 
