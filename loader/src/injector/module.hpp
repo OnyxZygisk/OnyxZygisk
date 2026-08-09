@@ -148,13 +148,18 @@ enum : uint32_t {
     PROCESS_GRANTED_ROOT = zygisk::StateFlag::PROCESS_GRANTED_ROOT,
     PROCESS_ON_DENYLIST = zygisk::StateFlag::PROCESS_ON_DENYLIST,
 
+    // Mount mode, chosen by the user (WebUI). Kept in sync with the daemon's
+    // ProcessFlags (zygiskd/src/constants.rs). Neither bit = "revert only".
+    MOUNT_MODE_SETNS = (1u << 2),
+    MOUNT_MODE_GLOBAL = (1u << 3),
+
     PROCESS_IS_MANAGER = (1u << 27),
     PROCESS_ROOT_IS_APATCH = (1u << 28),
     PROCESS_ROOT_IS_KSU = (1u << 29),
     PROCESS_ROOT_IS_MAGISK = (1u << 30),
 
-    PRIVATE_MASK = (PROCESS_IS_MANAGER | PROCESS_ROOT_IS_APATCH | PROCESS_ROOT_IS_KSU |
-                    PROCESS_ROOT_IS_MAGISK),
+    PRIVATE_MASK = (MOUNT_MODE_SETNS | MOUNT_MODE_GLOBAL | PROCESS_IS_MANAGER |
+                    PROCESS_ROOT_IS_APATCH | PROCESS_ROOT_IS_KSU | PROCESS_ROOT_IS_MAGISK),
     UNMOUNT_MASK = PROCESS_ON_DENYLIST
 };
 

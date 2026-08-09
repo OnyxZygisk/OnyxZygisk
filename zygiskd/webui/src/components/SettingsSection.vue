@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /* Settings section — theme, language, hot-plug master switch. */
 import { inject, ref } from "vue";
-import { setHotplugMaster } from "../api/system";
+import { setHotplugMaster, setMountMode } from "../api/system";
+import type { MountMode } from "../api/system";
 import { useLocale } from "../composables/useLocale";
 import { AUTO_LOCALE } from "../composables/useLocale";
 import type { LocalePref } from "../composables/useLocale";
@@ -18,7 +19,9 @@ const theme = ref<ThemePref>(getThemePref());
 
 // Shared 6s-polled state (provided by App.vue); local fallback for standalone.
 const state = inject<MonitorState | null>(MONITOR_STATE_KEY, null) ?? useMonitorState();
-const { hotplug, load } = state;
+const { hotplug, mountMode, load } = state;
+
+const MOUNT_MODES: MountMode[] = ["revert", "setns", "global"];
 
 function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -41,6 +44,15 @@ async function toggleHotplug(enabled: boolean): Promise<void> {
     await load();
   } catch (e) {
     /* the next poll re-syncs the switch state */
+  }
+}
+
+async function onMountMode(e: Event): Promise<void> {
+  try {
+    await setMountMode((e.target as HTMLSelectElement).value as MountMode);
+    await load();
+  } catch (e) {
+    /* the next poll re-syncs the dropdown */
   }
 }
 </script>
@@ -71,6 +83,17 @@ async function toggleHotplug(enabled: boolean): Promise<void> {
           <span class="hint">{{ t("settings.hotplugHint") }}</span>
         </span>
         <Switch :checked="hotplug" @update:checked="toggleHotplug" />
+      </div>
+      <div class="setting-row">
+        <span class="s-label">
+          {{ t("settings.mountMode") }}
+          <span class="hint">{{ t(`settings.mountMode_${mountMode}_hint`) }}</span>
+        </span>
+        <select :value="mountMode" @change="onMountMode">
+          <option v-for="m in MOUNT_MODES" :key="m" :value="m">
+            {{ t(`settings.mountMode_${m}`) }}
+          </option>
+        </select>
       </div>
     </Card>
 

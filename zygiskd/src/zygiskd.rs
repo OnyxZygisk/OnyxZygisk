@@ -859,9 +859,24 @@ fn handle_get_process_flags(stream: &mut UnixStream) -> Result<()> {
         _ => (), // No flag for None, TooOld, or Multiple
     }
 
+    flags |= mount_mode_flag();
+
     trace!("Flags for UID {}: {:?}", uid, flags);
     stream.write_u32(flags.bits())?;
     Ok(())
+}
+
+/// The user-selected mount mode, read fresh from `WORKDIR/mount_mode` (so a
+/// change takes effect on the next app launch, no restart). Values: `setns`,
+/// `global`, or anything else / missing = the default "revert only". Rides
+/// along in the process flags so the loader can apply it per fork.
+fn mount_mode_flag() -> ProcessFlags {
+    let path = Path::new(TMP_PATH.get().unwrap()).join("mount_mode");
+    match fs::read_to_string(path).ok().as_deref().map(str::trim) {
+        Some("setns") => ProcessFlags::MOUNT_MODE_SETNS,
+        Some("global") => ProcessFlags::MOUNT_MODE_GLOBAL,
+        _ => ProcessFlags::empty(), // "revert" (default)
+    }
 }
 
 fn handle_update_mount_namespace(stream: &mut UnixStream, context: &AppContext) -> Result<()> {

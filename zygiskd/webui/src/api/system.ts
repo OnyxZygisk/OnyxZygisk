@@ -31,6 +31,8 @@ const STATUS_SCRIPT = [
   // Hot-plug master switch: off (WORKDIR/hotplug_off present) means staged
   // updates only apply at the root solution's own boot-time swap.
   'echo "hotplug=$([ -f "$W/hotplug_off" ] && echo 0 || echo 1)"',
+  // Mount mode: revert (default) | setns | global. See setMountMode.
+  'echo "mount_mode=$(cat "$W/mount_mode" 2>/dev/null || echo revert)"',
   'echo "@@monitor"',
   'cat "$W/module.prop" 2>/dev/null | head -c 600; echo',
   'echo "@@modules"',
@@ -199,6 +201,19 @@ export async function setModuleHotplug(id: string, enabled: boolean): Promise<vo
 export async function setHotplugMaster(enabled: boolean): Promise<void> {
   const flag = `${WORKDIR}/hotplug_off`;
   await exec(enabled ? `rm -f '${flag}'` : `touch '${flag}'`);
+}
+
+/** Mount mode for denylisted apps, applied by the daemon/loader on the next
+ * app launch (no restart). One of:
+ *  - "revert": unmount module/root traces directly from zygote (default);
+ *  - "setns":  switch denylisted apps into a cached clean namespace;
+ *  - "global": mount modules into every app, hide only su/root.
+ * Stored in WORKDIR/mount_mode; see zygiskd::mount_mode_flag. */
+export type MountMode = "revert" | "setns" | "global";
+export async function setMountMode(mode: MountMode): Promise<void> {
+  const flag = `${WORKDIR}/mount_mode`;
+  // "revert" is the default — clear the file rather than storing it.
+  await exec(mode === "revert" ? `rm -f '${flag}'` : `printf '%s' '${mode}' > '${flag}'`);
 }
 
 /** Normalize version display: strip a leading v/V then add one. */

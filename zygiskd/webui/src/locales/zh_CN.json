@@ -69,6 +69,13 @@
     "about": "关于",
     "aboutText": "OnyxZygisk —— 基于 ptrace 的 Zygisk 实现，支持 FN（Functional Node）模块。fork 自 NeoZygisk。",
     "hotplug": "热插拔（Zygisk Host）",
-    "hotplugHint": "关闭后模块需重启才生效"
+    "hotplugHint": "关闭后模块需重启才生效",
+    "mountMode": "挂载模式",
+    "mountMode_revert": "仅还原挂载",
+    "mountMode_revert_hint": "直接从 zygote 卸载模块/root 痕迹",
+    "mountMode_setns": "命名空间切换",
+    "mountMode_setns_hint": "把 denylist 应用切进纯净命名空间",
+    "mountMode_global": "全局挂载",
+    "mountMode_global_hint": "所有应用都挂模块，仅隐藏 su/root"
   }
 }

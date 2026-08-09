@@ -539,27 +539,33 @@ void ZygiskContext::nativeForkAndSpecialize_pre() {
     LOGV("pre forkAndSpecialize [%s]", process);
     flags |= APP_FORK_AND_SPECIALIZE;
 
+    // Direct zygote unmounting is the "revert only" mount mode only. In the
+    // "namespace switch" and "global" modes the zygote keeps its module mounts
+    // (denylisted apps are handled by setns / not at all — see the unshare
+    // hook), so this whole step is skipped.
     if (!g_hook->zygote_unmounted && g_hook->zygote_traces.size() == 0) {
         info_flags = zygiskd::GetProcessFlags(args.app->uid);
 
-        g_hook->zygote_traces = check_zygote_traces(info_flags);
+        if (!(info_flags & (MOUNT_MODE_SETNS | MOUNT_MODE_GLOBAL))) {
+            g_hook->zygote_traces = check_zygote_traces(info_flags);
 
-        if (!abort_zygote_unmount(g_hook->zygote_traces, info_flags)) {
-            auto removal_predicate = [](const mount_info &trace) {
-                LOGV("unmounting %s (mnt_id: %u)", trace.target.c_str(), trace.id);
-                if (umount2(trace.target.c_str(), MNT_DETACH) == 0) {
-                    return true;  // Success: Mark for removal.
-                } else {
-                    LOGE("failed to unmount %s: %s", trace.target.c_str(), strerror(errno));
-                    return false;  // Failure: Keep this trace in the vector.
-                }
-            };
+            if (!abort_zygote_unmount(g_hook->zygote_traces, info_flags)) {
+                auto removal_predicate = [](const mount_info &trace) {
+                    LOGV("unmounting %s (mnt_id: %u)", trace.target.c_str(), trace.id);
+                    if (umount2(trace.target.c_str(), MNT_DETACH) == 0) {
+                        return true;  // Success: Mark for removal.
+                    } else {
+                        LOGE("failed to unmount %s: %s", trace.target.c_str(), strerror(errno));
+                        return false;  // Failure: Keep this trace in the vector.
+                    }
+                };
 
-            auto new_end = std::remove_if(g_hook->zygote_traces.begin(),
-                                          g_hook->zygote_traces.end(), removal_predicate);
+                auto new_end = std::remove_if(g_hook->zygote_traces.begin(),
+                                              g_hook->zygote_traces.end(), removal_predicate);
 
-            g_hook->zygote_traces.erase(new_end, g_hook->zygote_traces.end());
-            g_hook->zygote_unmounted = true;
+                g_hook->zygote_traces.erase(new_end, g_hook->zygote_traces.end());
+                g_hook->zygote_unmounted = true;
+            }
         }
     }
 

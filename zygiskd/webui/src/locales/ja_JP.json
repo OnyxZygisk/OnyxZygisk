@@ -69,6 +69,13 @@
     "about": "このモジュールについて",
     "aboutText": "OnyxZygisk — ptrace ベースの Zygisk 実装で、FN（Functional Node）モジュールに対応しています。NeoZygisk のフォークです。",
     "hotplug": "ホットプラグ（Zygisk Host）",
-    "hotplugHint": "オフの間は再起動後にのみ有効"
+    "hotplugHint": "オフの間は再起動後にのみ有効",
+    "mountMode": "マウントモード",
+    "mountMode_revert": "復元のみ",
+    "mountMode_revert_hint": "zygote から直接モジュール/root の痕跡をアンマウント",
+    "mountMode_setns": "名前空間切替",
+    "mountMode_setns_hint": "拒否リストのアプリをクリーンな名前空間へ切替",
+    "mountMode_global": "グローバル",
+    "mountMode_global_hint": "全アプリにモジュールをマウントし su/root のみ隠す"
   }
 }

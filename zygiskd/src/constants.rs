@@ -91,6 +91,13 @@ bitflags! {
         const PROCESS_GRANTED_ROOT = 1 << 0;
         /// The process is on the denylist and module mounts should be hidden.
         const PROCESS_ON_DENYLIST = 1 << 1;
+        /// Mount mode "namespace switch": hide by setns-ing denylisted apps into
+        /// the cached clean namespace instead of unmounting from zygote. Neither
+        /// this nor MOUNT_MODE_GLOBAL set = "revert only" (unmount from zygote).
+        const MOUNT_MODE_SETNS = 1 << 2;
+        /// Mount mode "global": mount modules into every app, never unmount for
+        /// the denylist. Only su/root visibility is hidden.
+        const MOUNT_MODE_GLOBAL = 1 << 3;
         /// The process is the root manager application itself.
         const PROCESS_IS_MANAGER = 1 << 27;
         /// The active root solution is APatch.

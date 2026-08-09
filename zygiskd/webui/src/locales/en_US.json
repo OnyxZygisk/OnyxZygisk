@@ -69,6 +69,13 @@
     "about": "About",
     "aboutText": "OnyxZygisk — a Zygisk implementation via ptrace, with FN (Functional Node) modules. Fork of NeoZygisk.",
     "hotplug": "Hot-plug (Zygisk Host)",
-    "hotplugHint": "When off, modules take effect only after a reboot"
+    "hotplugHint": "When off, modules take effect only after a reboot",
+    "mountMode": "Mount mode",
+    "mountMode_revert": "Revert only",
+    "mountMode_revert_hint": "Unmount module/root traces directly from zygote",
+    "mountMode_setns": "Namespace switch",
+    "mountMode_setns_hint": "Switch denylisted apps into a clean namespace",
+    "mountMode_global": "Global",
+    "mountMode_global_hint": "Mount modules into every app; hide only su/root"
   }
 }
