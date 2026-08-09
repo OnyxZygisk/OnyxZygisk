@@ -502,9 +502,25 @@ static void hotplug_poller(ZygiskContext *ctx, JavaVM *vm) {
 void ZygiskContext::server_specialize_pre() {
     run_modules_pre();
     zygiskd::SystemServerStarted();
+}
+
+void ZygiskContext::server_specialize_post() {
+    run_modules_post();
 
     // Start the hot-plug poller once (system_server only). No restart of any
     // kind is involved: the module is loaded into the running process.
+    //
+    // This MUST run in _post, not _pre. server_specialize_pre() executes in
+    // the freshly forked child *before* the original nativeForkSystemServer
+    // reaches SpecializeCommon -> selinux_android_setcontext -> setcon().
+    // setcon() (writing /proc/self/attr/current) is rejected by the kernel
+    // for any process with more than one thread — the reason zygote is
+    // single-threaded by design. Spawning the poller thread in _pre left the
+    // child multi-threaded during that transition, so setcon() failed and
+    // zygote aborted (JNI FatalError, "selinux_android_setcontext ... failed")
+    // on every boot with a module opted in — a deterministic bootloop. By
+    // _post the SELinux context transition is already done, so an extra
+    // thread is harmless.
     static std::atomic<bool> started{false};
     if (!started.exchange(true)) {
         JavaVM *vm = nullptr;
@@ -514,8 +530,6 @@ void ZygiskContext::server_specialize_pre() {
         }
     }
 }
-
-void ZygiskContext::server_specialize_post() { run_modules_post(); }
 
 // -----------------------------------------------------------------
 
