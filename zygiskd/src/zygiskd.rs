@@ -645,10 +645,61 @@ fn opted_in_staged_modules() -> Vec<(String, PathBuf)> {
 /// launch instead of never. Cheap to call liberally: a directory scan plus
 /// marker checks, and each module is scheduled for real work at most once
 /// (guarded by the marker file itself).
+/// Realtime signal the loader arms a handler for inside system_server (see
+/// `kHotplugSignal` in loader/src/injector/module.cpp). Must match that value.
+const HOTPLUG_SIGNAL: i32 = 40;
+
+/// The pid of the running `system_server`, found by scanning `/proc`.
+fn pidof_system_server() -> Option<i32> {
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        if let Ok(cmdline) = fs::read_to_string(format!("/proc/{pid}/cmdline")) {
+            if cmdline.split('\0').next() == Some("system_server") {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
+/// Poke the live system_server (once per boot) to load hot-plugged modules
+/// into itself — the zero-reboot path for framework modules like LSPosed.
+///
+/// Deliberately only fires after `system_server_ready()` (boot complete): the
+/// loader's handler spawns a worker thread, and a thread inside system_server
+/// during its early specialize window bootloops the device (setcon requires a
+/// single-threaded process). By boot-complete that window is long past.
+///
+/// Gated on the user having opted at least one module into hot-plug
+/// (`WORKDIR/hotplug/*`); a no-op otherwise. Signals at most once per daemon
+/// lifetime — the loader-side worker de-duplicates and loads everything served.
+fn signal_system_server_hotplug() {
+    static SIGNALED: AtomicBool = AtomicBool::new(false);
+    let hotplug_dir = Path::new(TMP_PATH.get().unwrap()).join("hotplug");
+    let has_optin = fs::read_dir(&hotplug_dir)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if !has_optin || SIGNALED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    match pidof_system_server() {
+        Some(pid) => {
+            let r = unsafe { libc::kill(pid, HOTPLUG_SIGNAL) };
+            info!("Hot-plug: signaled system_server (pid {}) to live-load modules (ret {})", pid, r);
+        }
+        None => warn!("Hot-plug: system_server pid not found; cannot live-load"),
+    }
+}
+
 fn run_pending_staged_services() {
     if !system_server_ready() {
         return;
     }
+    // Zero-reboot framework activation: tell the live system_server to pull in
+    // hot-plugged modules. See signal_system_server_hotplug.
+    signal_system_server_hotplug();
     let markers = Path::new(TMP_PATH.get().unwrap()).join("hotplug_activated");
     let Ok(dir) = fs::read_dir(&markers) else {
         return;
