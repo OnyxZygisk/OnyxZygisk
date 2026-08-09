@@ -28,11 +28,16 @@ create_sys_perm() {
 
 TMP_PATH=@WORK_DIRECTORY@
 
-if [ -d $TMP_PATH ]; then
-  rm -rf $TMP_PATH
-fi
-
+# This work dir holds BOTH fresh-every-boot runtime state (IPC sockets, the
+# copied libzygisk.so) and PERSISTENT user settings that must survive a reboot:
+# the hot-plug opt-in flags (hotplug/<id>), the hot-plug master switch
+# (hotplug_off), the mount mode (mount_mode) and the activation markers
+# (hotplug_activated/). The old code did `rm -rf $TMP_PATH` here, which wiped
+# all of that on every boot — so after a reboot a hot-plugged module lost its
+# hot-plug state entirely and the mount-mode selection reset to default. Keep
+# the directory; only the stale runtime IPC from the previous boot is cleared.
 create_sys_perm $TMP_PATH
+rm -f "$TMP_PATH"/*.sock "$TMP_PATH/init_monitor"
 
 if [ -f $MODDIR/lib64/libzygisk.so ];then
   create_sys_perm $TMP_PATH/lib64
