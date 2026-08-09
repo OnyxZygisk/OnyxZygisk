@@ -9,13 +9,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <csignal>
-
 #include <algorithm>
-#include <atomic>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <lsplt.hpp>
@@ -455,98 +450,22 @@ void ZygiskContext::app_specialize_post() {
     env->ReleaseStringUTFChars(args.app->nice_name, process);
 }
 
-// ── live hot-plug into the already-running system_server ──
-//
-// Framework modules (LSPosed) only take effect inside system_server, and the
-// goal is zero reboot. The hard constraint learned the painful way: a thread
-// must NOT exist inside system_server while it is being specialized — a
-// process with >1 thread cannot complete selinux_android_setcontext ->
-// setcon() during SpecializeCommon, which bootlooped every build that spawned
-// a thread in server_specialize_pre OR _post (v349–v355).
-//
-// So at specialize time we create no thread — we only ARM a realtime signal
-// handler (cheap, single-threaded, setcon-safe). The daemon sends that signal
-// only AFTER sys.boot_completed, i.e. long past the specialize window, when
-// system_server is fully up and already massively multi-threaded. The handler
-// then spawns a short-lived worker that pulls the current module list from the
-// daemon and loads any not-yet-loaded module into this live system_server.
-//
-// Signal 40 is a realtime signal (bionic reserves 32–34; 40 sits in the
-// user-available range) agreed with the daemon (see zygiskd's
-// signal_system_server_hotplug).
-static constexpr int kHotplugSignal = 40;
-static ZygiskContext *g_ss_ctx = nullptr;
-static JavaVM *g_ss_vm = nullptr;
-
-/// One pass: load every served module this system_server has not loaded yet.
-/// Runs on a worker thread spawned post-boot, never during specialize.
-static void hotplug_load_once() {
-    static std::mutex mtx;
-    static std::vector<std::string> loaded;
-    std::lock_guard<std::mutex> lk(mtx);
-
-    if (g_ss_ctx == nullptr || g_ss_vm == nullptr) return;
-    JNIEnv *penv = nullptr;
-    if (g_ss_vm->GetEnv(reinterpret_cast<void **>(&penv), JNI_VERSION_1_6) != JNI_OK) {
-        if (g_ss_vm->AttachCurrentThread(&penv, nullptr) != JNI_OK) return;
-    }
-
-    auto ms = zygiskd::ReadModules();
-    for (size_t i = 0; i < ms.size(); i++) {
-        auto &m = ms[i];
-        if (std::find(loaded.begin(), loaded.end(), m.name) != loaded.end()) continue;
-        if (LoadedModule lm = LoadModuleFromMemfd(m.memfd)) {
-            LOGI("hot-plug: loading module `%s` into live system_server", m.name.c_str());
-            g_ss_ctx->modules.emplace_back(static_cast<int>(i), lm.handle, lm.entry, lm.custom);
-            auto &mod = g_ss_ctx->modules.back();
-            mod.onLoad(penv);
-            // preServerSpecialize with fresh args — the specialize-time struct
-            // is long gone. LSPosed-class modules only read the env.
-            jint uid = 1000, gid = 1000, runtime_flags = 0;
-            jintArray gids = nullptr;
-            jlong caps = 0;
-            ServerSpecializeArgs_v1 args(uid, gid, gids, runtime_flags, caps, caps);
-            mod.preServerSpecialize(&args);
-            loaded.push_back(m.name);
-        }
-    }
-}
-
-/// Realtime-signal handler armed in system_server. Spawns the worker thread.
-/// Only ever runs post-boot (the daemon gates the signal on boot_completed),
-/// so creating a thread here is safe — the setcon single-thread requirement
-/// applies only during SpecializeCommon, which finished long ago.
-static void hotplug_signal_handler(int) {
-    if (g_ss_ctx != nullptr && g_ss_vm != nullptr) {
-        std::thread(hotplug_load_once).detach();
-    }
-}
+// Live injection into an already-running system_server was tried (a worker
+// thread pulling modules and calling preServerSpecialize) and is a dead end:
+// device logs proved it deterministically SIGSEGVs system_server the instant
+// the load runs. A framework module (LSPosed) only activates when it is loaded
+// at system_server's *fork/specialize* — never mid-life. So a module
+// hot-plugged after boot is activated by re-forking system_server once (a
+// controlled ~15s framework restart, not a full reboot); the daemon does that
+// after swapping the module into the active directory. See
+// zygiskd::activate_staged_module.
 
 void ZygiskContext::server_specialize_pre() {
     run_modules_pre();
     zygiskd::SystemServerStarted();
 }
 
-void ZygiskContext::server_specialize_post() {
-    run_modules_post();
-
-    // Arm the live hot-plug path — WITHOUT creating any thread here. See the
-    // block comment above: a thread during specialize bootloops the device.
-    static std::atomic<bool> armed{false};
-    if (!armed.exchange(true)) {
-        JavaVM *vm = nullptr;
-        if (env->GetJavaVM(&vm) == JNI_OK && vm != nullptr) {
-            g_ss_ctx = this;
-            g_ss_vm = vm;
-            struct sigaction sa {};
-            sa.sa_handler = hotplug_signal_handler;
-            sigemptyset(&sa.sa_mask);
-            sa.sa_flags = SA_RESTART;
-            sigaction(kHotplugSignal, &sa, nullptr);
-            LOGI("hot-plug: armed live loader signal in system_server");
-        }
-    }
-}
+void ZygiskContext::server_specialize_post() { run_modules_post(); }
 
 // -----------------------------------------------------------------
 

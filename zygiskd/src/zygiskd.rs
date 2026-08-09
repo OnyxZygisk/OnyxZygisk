@@ -599,6 +599,7 @@ fn activate_staged_module(name: &str, module_dir: &Path) {
     if !marker_svc.exists() && system_server_ready() {
         let dir_clone = dir.clone();
         let marker_clone = marker_svc.clone();
+        let name_clone = name.to_string();
         std::thread::spawn(move || {
             let p = dir_clone.join("service.sh");
             if p.is_file() {
@@ -608,6 +609,10 @@ fn activate_staged_module(name: &str, module_dir: &Path) {
                 let _ = fs::create_dir_all(parent);
             }
             let _ = fs::write(&marker_clone, b"1");
+            // lspd (and any service.sh daemon) is now up. Re-fork
+            // system_server once so this freshly hot-plugged framework module
+            // loads at specialize and actually activates — no full reboot.
+            restart_system_server_once(&name_clone);
         });
         info!("Hot-plug: scheduling service.sh for swapped module \"{}\"", name);
     }
@@ -645,10 +650,6 @@ fn opted_in_staged_modules() -> Vec<(String, PathBuf)> {
 /// launch instead of never. Cheap to call liberally: a directory scan plus
 /// marker checks, and each module is scheduled for real work at most once
 /// (guarded by the marker file itself).
-/// Realtime signal the loader arms a handler for inside system_server (see
-/// `kHotplugSignal` in loader/src/injector/module.cpp). Must match that value.
-const HOTPLUG_SIGNAL: i32 = 40;
-
 /// The pid of the running `system_server`, found by scanning `/proc`.
 fn pidof_system_server() -> Option<i32> {
     for entry in fs::read_dir("/proc").ok()?.flatten() {
@@ -664,32 +665,36 @@ fn pidof_system_server() -> Option<i32> {
     None
 }
 
-/// Poke the live system_server (once per boot) to load hot-plugged modules
-/// into itself — the zero-reboot path for framework modules like LSPosed.
-///
-/// Deliberately only fires after `system_server_ready()` (boot complete): the
-/// loader's handler spawns a worker thread, and a thread inside system_server
-/// during its early specialize window bootloops the device (setcon requires a
-/// single-threaded process). By boot-complete that window is long past.
-///
-/// Gated on the user having opted at least one module into hot-plug
-/// (`WORKDIR/hotplug/*`); a no-op otherwise. Signals at most once per daemon
-/// lifetime — the loader-side worker de-duplicates and loads everything served.
-fn signal_system_server_hotplug() {
-    static SIGNALED: AtomicBool = AtomicBool::new(false);
-    let hotplug_dir = Path::new(TMP_PATH.get().unwrap()).join("hotplug");
-    let has_optin = fs::read_dir(&hotplug_dir)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false);
-    if !has_optin || SIGNALED.swap(true, Ordering::Relaxed) {
+/// Restart just system_server (a ~15s framework "soft reboot", not a device
+/// reboot) so a freshly hot-plugged framework module (LSPosed) is loaded at
+/// the fresh fork/specialize — the ONLY point a framework module activates.
+/// Killing system_server makes init respawn zygote's system_server; our
+/// nativeForkSystemServer hook then injects the now-active module the normal,
+/// crash-free way. Guarded by a one-shot marker so it happens once per
+/// hot-plug, never on an ordinary boot (where the module is already active and
+/// no swap runs).
+fn restart_system_server_once(name: &str) {
+    let marker = Path::new(TMP_PATH.get().unwrap())
+        .join("hotplug_activated")
+        .join(format!("{name}.restarted"));
+    if marker.exists() {
         return;
     }
+    if let Some(parent) = marker.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&marker, b"1");
     match pidof_system_server() {
         Some(pid) => {
-            let r = unsafe { libc::kill(pid, HOTPLUG_SIGNAL) };
-            info!("Hot-plug: signaled system_server (pid {}) to live-load modules (ret {})", pid, r);
+            info!(
+                "Hot-plug: restarting system_server (pid {}) to activate framework module \"{}\"",
+                pid, name
+            );
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
         }
-        None => warn!("Hot-plug: system_server pid not found; cannot live-load"),
+        None => warn!("Hot-plug: system_server pid not found; cannot restart to activate \"{}\"", name),
     }
 }
 
@@ -697,9 +702,6 @@ fn run_pending_staged_services() {
     if !system_server_ready() {
         return;
     }
-    // Zero-reboot framework activation: tell the live system_server to pull in
-    // hot-plugged modules. See signal_system_server_hotplug.
-    signal_system_server_hotplug();
     let markers = Path::new(TMP_PATH.get().unwrap()).join("hotplug_activated");
     let Ok(dir) = fs::read_dir(&markers) else {
         return;
@@ -721,12 +723,17 @@ fn run_pending_staged_services() {
         }
         let dir_clone = active_dir.clone();
         let marker_clone = markers.join(format!("{name}.service"));
+        let name_clone = name.to_string();
         std::thread::spawn(move || {
             let p = dir_clone.join("service.sh");
             if p.is_file() {
                 run_module_script(&dir_clone, &p);
             }
             let _ = fs::write(&marker_clone, b"1");
+            // Re-fork system_server once so this freshly hot-plugged framework
+            // module activates at specialize — no full reboot. See
+            // restart_system_server_once.
+            restart_system_server_once(&name_clone);
         });
         info!("Hot-plug: scheduling deferred service.sh for swapped module \"{}\"", name);
     }
