@@ -1,3 +1,4 @@
+#include <dirent.h>
 #include <fcntl.h>
 #include <linux/eventpoll.h>
 #include <sys/signalfd.h>
@@ -6,6 +7,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cstdlib>
 #include <csignal>
 #include <sstream>
 
@@ -14,6 +16,64 @@
 #include "logging.hpp"
 #include "monitor.hpp"
 #include "utils.hpp"
+
+namespace {
+
+/// Quiet variant of get_program(): most /proc entries are not readable or
+/// not even a PID (kernel threads, zombies, "self", "net", ...), which is
+/// completely normal for a bulk scan, so this does not log on failure the
+/// way utils.cpp's get_program() does for its single-target use case.
+bool proc_exe_matches(int pid, const std::string &target_path) {
+    char link_path[32];
+    snprintf(link_path, sizeof(link_path), "/proc/%d/exe", pid);
+    char buf[256];
+    ssize_t n = readlink(link_path, buf, sizeof(buf) - 1);
+    if (n <= 0) return false;
+    buf[n] = '\0';
+    return target_path == buf;
+}
+
+/**
+ * @brief Kills an already-running zygote so init respawns a fresh one.
+ *
+ * On a normal boot this never finds anything: post-fs-data.sh (and this
+ * monitor) start well before init ever execs zygote. But when KernelSU is
+ * loaded late -- root granted after boot completes, e.g. via a kernel
+ * exploit on a locked-bootloader device -- zygote may already have been
+ * running, un-injected, for minutes by the time this monitor starts, and
+ * nothing else is guaranteed to ever restart it. Injection only fires on a
+ * *fresh* fork+exec of zygote, caught via the PTRACE_O_TRACEFORK on init that
+ * must already be in place by the time this is called. So the fix is the
+ * same one-time bootstrap a user would otherwise have to trigger by hand
+ * (what late-load root managers call a "soft restart"): kill the existing
+ * zygote once, so init respawns it and this monitor catches the fresh fork
+ * exactly like it would on a normal boot.
+ */
+void kill_stale_zygote_if_running(const std::string &program_path) {
+    DIR *proc_dir = opendir("/proc");
+    if (proc_dir == nullptr) {
+        PLOGE("opendir /proc");
+        return;
+    }
+    struct dirent *entry;
+    while ((entry = readdir(proc_dir)) != nullptr) {
+        char *end = nullptr;
+        long pid = strtol(entry->d_name, &end, 10);
+        if (end == entry->d_name || *end != '\0' || pid <= 0) {
+            continue;  // Not a PID directory (e.g. "self", "net", "sys").
+        }
+        if (proc_exe_matches(static_cast<int>(pid), program_path)) {
+            LOGI("found pre-existing zygote (PID %ld) predating this monitor -- likely late-loaded "
+                 "root where zygote started before us; killing it once so init respawns a fresh one",
+                 pid);
+            kill(static_cast<int>(pid), SIGKILL);
+            break;  // Only one process should ever match a given ABI's zygote path.
+        }
+    }
+    closedir(proc_dir);
+}
+
+}  // namespace
 
 // --- AppMonitor Method Implementations ---
 
@@ -132,6 +192,10 @@ bool AppMonitor::prepare_environment() {
 void AppMonitor::run() {
     socket_handler_.Init();
     ptrace_handler_.Init();
+    // Must run after ptrace_handler_.Init() has seized init with
+    // PTRACE_O_TRACEFORK, so a kill here is guaranteed to be observed as a
+    // fresh fork+exec once init respawns zygote.
+    kill_stale_zygote_if_running(zygote_.program_path_);
     event_loop_.Init();
     event_loop_.RegisterHandler(socket_handler_, EPOLLIN | EPOLLET);
     event_loop_.RegisterHandler(ptrace_handler_, EPOLLIN | EPOLLET);
