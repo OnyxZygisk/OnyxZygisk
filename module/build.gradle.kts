@@ -99,6 +99,7 @@ androidComponents.onVariants { variant ->
             // (banner etc.) must NOT be filtered or they get corrupted.
             exclude(
                 "module.prop", "action.sh", "customize.sh", "post-fs-data.sh",
+                "late-load.sh", "zygisk-init.sh",
                 "service.sh", "uninstall.sh", "zygisk-ctl.sh",
                 "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.webp", "**/*.gif", "**/*.ico",
             )
@@ -120,7 +121,10 @@ androidComponents.onVariants { variant ->
             )
         }
         from("$projectDir/src") {
-            include("action.sh", "customize.sh", "post-fs-data.sh", "service.sh", "uninstall.sh", "zygisk-ctl.sh")
+            include(
+                "action.sh", "customize.sh", "post-fs-data.sh", "late-load.sh",
+                "zygisk-init.sh", "service.sh", "uninstall.sh", "zygisk-ctl.sh",
+            )
             val tokens = mapOf(
                 "DEBUG" to if (buildTypeLowered == "debug") "true" else "false",
                 "MIN_APATCH_VERSION" to "$minAPatchVersion",
