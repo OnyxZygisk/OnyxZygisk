@@ -1,10 +1,15 @@
+#include <android/dlext.h>
 #include <dlfcn.h>
 #include <elf.h>
+#include <fcntl.h>
 #include <link.h>
 #include <signal.h>
 #include <sys/auxv.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
+#include <sys/sendfile.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/system_properties.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -19,6 +24,56 @@
 #include "daemon.hpp"
 #include "logging.hpp"
 #include "utils.hpp"
+
+/**
+ * @brief Reads a shared library from disk into an anonymous memfd.
+ *
+ * On some devices (observed with KernelSU LKM "late-load" root, where the
+ * kernel module is inserted into an already-booted system instead of during
+ * boot), a path-based dlopen() of a file under /data/adb/... from inside
+ * zygote fails with "library ... not found" even though the file is plainly
+ * readable via a root shell -- the bionic linker's default namespace for the
+ * process rejects the path before ever touching the filesystem/SELinux layer.
+ * Loading via an already-open fd sidesteps path/namespace resolution
+ * entirely: see the android_dlopen_ext() call below.
+ *
+ * @return An open memfd holding a copy of the library, or -1 on failure.
+ */
+static int prepare_library_memfd(const char *lib_path) {
+    int src_fd = open(lib_path, O_RDONLY | O_CLOEXEC);
+    if (src_fd == -1) {
+        PLOGE("open library %s", lib_path);
+        return -1;
+    }
+
+    struct stat st{};
+    if (fstat(src_fd, &st) == -1) {
+        PLOGE("fstat library %s", lib_path);
+        close(src_fd);
+        return -1;
+    }
+
+    int memfd = static_cast<int>(syscall(SYS_memfd_create, "libzygisk.so", 0));
+    if (memfd == -1) {
+        PLOGE("memfd_create for %s", lib_path);
+        close(src_fd);
+        return -1;
+    }
+
+    off_t remaining = st.st_size;
+    while (remaining > 0) {
+        ssize_t n = sendfile(memfd, src_fd, nullptr, remaining);
+        if (n <= 0) {
+            PLOGE("sendfile %s into memfd", lib_path);
+            close(src_fd);
+            close(memfd);
+            return -1;
+        }
+        remaining -= n;
+    }
+    close(src_fd);
+    return memfd;
+}
 
 /**
  * @brief Injects a shared library into a running process at its main entry point.
@@ -39,7 +94,8 @@
  *     way to pause the process at the perfect moment.
  * 4.  **Remote Code Execution**: Once the process is paused, we restore the original entry point.
  *     We then use `ptrace` to execute functions within the target process's context.
- *     - Remotely call `dlopen()` to load our library.
+ *     - Remotely call `android_dlopen_ext()` to load our library from an anonymous memfd
+ *       (see prepare_library_memfd()), rather than a path-based `dlopen()`.
  *     - Remotely call `dlsym()` to find the address of our library's `entry` function.
  *     - Remotely call our `entry` function to initialize OnyxZygisk.
  * 5.  **Restore State**: After injection, restore all CPU registers, which allows the original
@@ -51,6 +107,14 @@
  */
 bool inject_on_main(int pid, const char *lib_path) {
     LOGI("starting library injection for PID: %d, library: %s", pid, lib_path);
+
+    // Read the library into an anonymous memfd up front, instead of handing the
+    // target a path to dlopen() itself -- see prepare_library_memfd() for why.
+    int library_memfd = prepare_library_memfd(lib_path);
+    if (library_memfd == -1) {
+        LOGE("failed to read library %s into memfd, injection aborted", lib_path);
+        return false;
+    }
 
     // Backup of the target's registers, to be restored before detaching.
     struct user_regs_struct regs{}, backup{};
@@ -187,6 +251,14 @@ bool inject_on_main(int pid, const char *lib_path) {
     // It is vital we keep the original PSTATE intact in the backup, so
     // the original executable can securely validate its own BTI pad upon final resume.
     memcpy(&backup, &regs, sizeof(regs));
+    // Fix up the backup's IP right away: every failure path below simply
+    // restores `backup` and returns, so the target always resumes at its real
+    // entry point instead of the deliberately-invalid hijack address. Doing
+    // this only on the final success path (as a previous version of this
+    // function did) meant any failure past this point detached the target
+    // with its IP still parked on the hijack address, crashing it for real
+    // the instant it resumed.
+    backup.REG_IP = (long) entry_addr;
 
 #if defined(__aarch64__)
     // Clear the BTYPE field (bits 10 and 11) in PSTATE.
@@ -200,61 +272,108 @@ bool inject_on_main(int pid, const char *lib_path) {
     auto local_map = MapInfo::Scan();
     auto libc_return_addr = find_module_return_addr(map, "libc.so");
 
-    // Remotely call dlopen(lib_path, RTLD_NOW)
-    LOGV("executing remote call to dlopen(\"%s\")", lib_path);
-    auto dlopen_addr = find_func_addr(local_map, map, "libdl.so", "dlopen");
-    if (dlopen_addr == nullptr) {
-        LOGE("could not find address of dlopen in the target process");
+    // Any failure from here on gracefully resumes the target at its real
+    // entry point (via `backup`) instead of leaving it crashed or hung.
+    auto abort_injection = [&](const char *msg) {
+        LOGE("%s", msg);
+        set_regs(pid, backup);
+        if (library_memfd != -1) close(library_memfd);
         return false;
+    };
+
+    // Duplicate our memfd into the target's own fd table via the /proc/self/fd
+    // magic-symlink trick, so the target can pass android_dlopen_ext a real fd
+    // instead of a path. See prepare_library_memfd() for why a path-based
+    // dlopen() is not used here.
+    auto open_addr = find_func_addr(local_map, map, "libc.so", "open");
+    if (open_addr == nullptr) {
+        return abort_injection("could not find address of open in the target process");
     }
-    std::vector<long> args;
-    auto remote_lib_path = push_string(pid, regs, lib_path);
-    args.push_back((long) remote_lib_path);
+    char proc_fd_path[64];
+    snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/%d/fd/%d", getpid(), library_memfd);
+    auto remote_proc_fd_path = push_string(pid, regs, proc_fd_path);
+    if (remote_proc_fd_path == 0) {
+        return abort_injection("failed to push memfd proc path to target");
+    }
+    std::vector<long> args{(long) remote_proc_fd_path, O_RDONLY};
+    auto open_result =
+        remote_call(pid, regs, (uintptr_t) open_addr, (uintptr_t) libc_return_addr, args);
+    if (open_result == 0 || open_result == static_cast<uintptr_t>(-1)) {
+        return abort_injection("remote open() of library memfd failed in target process");
+    }
+    int remote_fd = static_cast<int>(open_result);
+    LOGV("duplicated library memfd into target as fd %d", remote_fd);
+
+    // Remotely call android_dlopen_ext(name, RTLD_NOW, &extinfo) with
+    // ANDROID_DLEXT_USE_LIBRARY_FD, loading from the fd instead of a path.
+    LOGV("executing remote call to android_dlopen_ext via fd %d", remote_fd);
+    auto dlopen_ext_addr = find_func_addr(local_map, map, "libdl.so", "android_dlopen_ext");
+    if (dlopen_ext_addr == nullptr) {
+        return abort_injection("could not find address of android_dlopen_ext in the target process");
+    }
+
+    android_dlextinfo extinfo{};
+    extinfo.flags = ANDROID_DLEXT_USE_LIBRARY_FD;
+    extinfo.library_fd = remote_fd;
+    auto remote_extinfo = push_bytes(pid, regs, &extinfo, sizeof(extinfo));
+    if (remote_extinfo == 0) {
+        return abort_injection("failed to push android_dlextinfo to target");
+    }
+    auto remote_name = push_string(pid, regs, "libzygisk.so");
+    if (remote_name == 0) {
+        return abort_injection("failed to push library name to target");
+    }
+
+    args.clear();
+    args.push_back((long) remote_name);
     args.push_back((long) RTLD_NOW);
-    auto remote_handle =
-        remote_call(pid, regs, (uintptr_t) dlopen_addr, (uintptr_t) libc_return_addr, args);
+    args.push_back((long) remote_extinfo);
+    auto remote_handle = remote_call(pid, regs, (uintptr_t) dlopen_ext_addr,
+                                     (uintptr_t) libc_return_addr, args);
 
     if (remote_handle == 0) {
-        LOGE("remote call to dlopen failed, retrieving error message with dlerror");
+        LOGE("remote call to android_dlopen_ext failed, retrieving error message with dlerror");
         auto dlerror_addr = find_func_addr(local_map, map, "libdl.so", "dlerror");
         if (dlerror_addr == nullptr) {
-            LOGE("could not find address of dlerror; cannot retrieve error string");
-            return false;
+            return abort_injection("could not find address of dlerror; cannot retrieve error string");
         }
         args.clear();
         auto dlerror_str_addr =
             remote_call(pid, regs, (uintptr_t) dlerror_addr, (uintptr_t) libc_return_addr, args);
         if (dlerror_str_addr == 0) {
-            LOGE("remote call to dlerror returned null");
-            return false;
+            return abort_injection("remote call to dlerror returned null");
         }
         auto strlen_addr = find_func_addr(local_map, map, "libc.so", "strlen");
         if (strlen_addr == nullptr) {
-            LOGE("could not find address of strlen; cannot measure error string length");
-            return false;
+            return abort_injection("could not find address of strlen; cannot measure error string length");
         }
         args.clear();
         args.push_back(dlerror_str_addr);
         auto dlerror_len =
             remote_call(pid, regs, (uintptr_t) strlen_addr, (uintptr_t) libc_return_addr, args);
         if (dlerror_len <= 0) {
-            LOGE("dlerror string length is invalid (%" PRIuPTR ")", dlerror_len);
-            return false;
+            return abort_injection("dlerror string length is invalid");
         }
         std::string err;
         err.resize(dlerror_len + 1, 0);
         read_proc(pid, (uintptr_t) dlerror_str_addr, err.data(), dlerror_len);
         LOGE("dlopen error: %s", err.c_str());
+        set_regs(pid, backup);
+        close(library_memfd);
         return false;
     }
-    LOGI("successfully loaded library via remote dlopen, handle: 0x%" PRIxPTR, remote_handle);
+    LOGI("successfully loaded library via remote android_dlopen_ext, handle: 0x%" PRIxPTR,
+         remote_handle);
+    // The target now holds its own independent fd/mapping; close ours and mark
+    // it closed so abort_injection() below won't double-close it.
+    close(library_memfd);
+    library_memfd = -1;
 
     // Remotely call dlsym(handle, "entry")
     LOGV("executing remote call to dlsym to find the 'entry' symbol");
     auto dlsym_addr = find_func_addr(local_map, map, "libdl.so", "dlsym");
     if (dlsym_addr == nullptr) {
-        LOGE("could not find address of dlsym in the target process");
-        return false;
+        return abort_injection("could not find address of dlsym in the target process");
     }
     args.clear();
     auto remote_entry_str = push_string(pid, regs, "entry");
@@ -264,8 +383,7 @@ bool inject_on_main(int pid, const char *lib_path) {
         remote_call(pid, regs, (uintptr_t) dlsym_addr, (uintptr_t) libc_return_addr, args);
 
     if (injector_entry == 0) {
-        LOGE("dlsym failed to find the 'entry' symbol in the injected library");
-        return false;
+        return abort_injection("dlsym failed to find the 'entry' symbol in the injected library");
     }
     LOGI("found injector entry point at address 0x%" PRIxPTR, injector_entry);
 
@@ -291,8 +409,7 @@ bool inject_on_main(int pid, const char *lib_path) {
     remote_call(pid, regs, injector_entry, (uintptr_t) libc_return_addr, args);
 
     // --- Step 5: Restore State ---
-    // Set the instruction pointer back to the original entry address and restore all registers.
-    backup.REG_IP = (long) entry_addr;
+    // `backup.REG_IP` was already set back to the original entry address above.
     LOGI("injection complete, restoring registers before resuming normal execution");
     if (!set_regs(pid, backup)) {
         LOGE("failed to restore original registers for PID %d", pid);
@@ -366,12 +483,17 @@ static bool detach_with_gki_workaround(int pid, int detach_signal) {
 
 // --- Strategy 1: PTRACE_SEIZE (Preferred) ---
 
-static bool trace_with_seize(int pid) {
+static bool trace_with_seize(int pid, bool *seize_syscall_failed) {
     LOGI("attempting trace_seize on PID %d", pid);
+    *seize_syscall_failed = false;
 
     // PTRACE_O_EXITKILL ensures Zygote dies if we crash, preventing a zombie state.
     if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_EXITKILL) == -1) {
-        // We do not return false here immediately; we let the caller handle errno.
+        // Only this specific failure is a real "PTRACE_SEIZE failed" -- every
+        // other `return false` below happens after the seize already
+        // succeeded, so errno at that point belongs to some unrelated later
+        // call and must not be reported (or fallen back on) as a seize error.
+        *seize_syscall_failed = true;
         return false;
     }
 
@@ -493,15 +615,24 @@ bool trace_zygote(int pid) {
     LOGI("attaching to zygote (PID: %d) to begin injection", pid);
 
     // 1. Try SEIZE (Modern, robust handling of group stops)
-    if (trace_with_seize(pid)) {
+    bool seize_syscall_failed = false;
+    if (trace_with_seize(pid, &seize_syscall_failed)) {
         LOGI("successfully detached from zygote (via SEIZE), OnyxZygisk active");
         return true;
+    }
+    int seize_errno = errno;
+
+    if (!seize_syscall_failed) {
+        // The seize itself succeeded; injection failed for some other reason
+        // (already logged by inject_on_main/abort_injection). Falling back to
+        // PTRACE_ATTACH would just hit the identical failure again.
+        return false;
     }
 
     // 2. Check for fallback condition
     // PTRACE_SEIZE returns EIO if the process state prohibits seizing,
     // or sometimes if security modules interfere.
-    if (errno == EIO) {
+    if (seize_errno == EIO) {
         LOGW("PTRACE_SEIZE failed with EIO, attempting fallback to PTRACE_ATTACH");
 
         if (trace_with_attach(pid)) {
@@ -511,7 +642,8 @@ bool trace_zygote(int pid) {
     } else {
         // If it wasn't EIO (e.g., EPERM, ESRCH), Attach will likely fail too,
         // or the error is fatal.
-        PLOGE("PTRACE_SEIZE failed (errno: %d)", errno);
+        errno = seize_errno;
+        PLOGE("PTRACE_SEIZE failed (errno: %d)", seize_errno);
     }
 
     return false;
