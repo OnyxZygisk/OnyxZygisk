@@ -1,15 +1,10 @@
-#include <android/dlext.h>
 #include <dlfcn.h>
 #include <elf.h>
-#include <fcntl.h>
 #include <link.h>
 #include <signal.h>
 #include <sys/auxv.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
-#include <sys/sendfile.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/system_properties.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -24,56 +19,6 @@
 #include "daemon.hpp"
 #include "logging.hpp"
 #include "utils.hpp"
-
-/**
- * @brief Reads a shared library from disk into an anonymous memfd.
- *
- * On some devices (observed with KernelSU LKM "late-load" root, where the
- * kernel module is inserted into an already-booted system instead of during
- * boot), a path-based dlopen() of a file under /data/adb/... from inside
- * zygote fails with "library ... not found" even though the file is plainly
- * readable via a root shell -- the bionic linker's default namespace for the
- * process rejects the path before ever touching the filesystem/SELinux layer.
- * Loading via an already-open fd sidesteps path/namespace resolution
- * entirely: see the android_dlopen_ext() call below.
- *
- * @return An open memfd holding a copy of the library, or -1 on failure.
- */
-static int prepare_library_memfd(const char *lib_path) {
-    int src_fd = open(lib_path, O_RDONLY | O_CLOEXEC);
-    if (src_fd == -1) {
-        PLOGE("open library %s", lib_path);
-        return -1;
-    }
-
-    struct stat st{};
-    if (fstat(src_fd, &st) == -1) {
-        PLOGE("fstat library %s", lib_path);
-        close(src_fd);
-        return -1;
-    }
-
-    int memfd = static_cast<int>(syscall(SYS_memfd_create, "libzygisk.so", 0));
-    if (memfd == -1) {
-        PLOGE("memfd_create for %s", lib_path);
-        close(src_fd);
-        return -1;
-    }
-
-    off_t remaining = st.st_size;
-    while (remaining > 0) {
-        ssize_t n = sendfile(memfd, src_fd, nullptr, remaining);
-        if (n <= 0) {
-            PLOGE("sendfile %s into memfd", lib_path);
-            close(src_fd);
-            close(memfd);
-            return -1;
-        }
-        remaining -= n;
-    }
-    close(src_fd);
-    return memfd;
-}
 
 /**
  * @brief Injects a shared library into a running process at its main entry point.
@@ -94,8 +39,7 @@ static int prepare_library_memfd(const char *lib_path) {
  *     way to pause the process at the perfect moment.
  * 4.  **Remote Code Execution**: Once the process is paused, we restore the original entry point.
  *     We then use `ptrace` to execute functions within the target process's context.
- *     - Remotely call `android_dlopen_ext()` to load our library from an anonymous memfd
- *       (see prepare_library_memfd()), rather than a path-based `dlopen()`.
+ *     - Remotely call `dlopen()` to load our library.
  *     - Remotely call `dlsym()` to find the address of our library's `entry` function.
  *     - Remotely call our `entry` function to initialize OnyxZygisk.
  * 5.  **Restore State**: After injection, restore all CPU registers, which allows the original
@@ -107,14 +51,6 @@ static int prepare_library_memfd(const char *lib_path) {
  */
 bool inject_on_main(int pid, const char *lib_path) {
     LOGI("starting library injection for PID: %d, library: %s", pid, lib_path);
-
-    // Read the library into an anonymous memfd up front, instead of handing the
-    // target a path to dlopen() itself -- see prepare_library_memfd() for why.
-    int library_memfd = prepare_library_memfd(lib_path);
-    if (library_memfd == -1) {
-        LOGE("failed to read library %s into memfd, injection aborted", lib_path);
-        return false;
-    }
 
     // Backup of the target's registers, to be restored before detaching.
     struct user_regs_struct regs{}, backup{};
@@ -277,62 +213,52 @@ bool inject_on_main(int pid, const char *lib_path) {
     auto abort_injection = [&](const char *msg) {
         LOGE("%s", msg);
         set_regs(pid, backup);
-        if (library_memfd != -1) close(library_memfd);
         return false;
     };
 
-    // Duplicate our memfd into the target's own fd table via the /proc/self/fd
-    // magic-symlink trick, so the target can pass android_dlopen_ext a real fd
-    // instead of a path. See prepare_library_memfd() for why a path-based
-    // dlopen() is not used here.
-    auto open_addr = find_func_addr(local_map, map, "libc.so", "open");
-    if (open_addr == nullptr) {
-        return abort_injection("could not find address of open in the target process");
+    // Remotely call dlopen(lib_path, RTLD_NOW).
+    //
+    // This deliberately loads by PATH rather than from a memfd via
+    // android_dlopen_ext(ANDROID_DLEXT_USE_LIBRARY_FD). An fd-based load was
+    // tried and reverted: handing the target an fd requires it to open
+    // /proc/<tracer>/fd/<n>, which the kernel gates behind ptrace_may_access()
+    // plus SELinux and which simply fails on some devices; and any fd left
+    // open in zygote is fatal, because zygote validates every open descriptor
+    // against an allowlist on each fork and aborts the process outright on an
+    // unrecognized one ("Not allowlisted ... /memfd:libzygisk.so").
+    LOGV("executing remote call to dlopen(\"%s\")", lib_path);
+    auto dlopen_addr = find_func_addr(local_map, map, "libdl.so", "dlopen");
+    if (dlopen_addr == nullptr) {
+        return abort_injection("could not find address of dlopen in the target process");
     }
-    char proc_fd_path[64];
-    snprintf(proc_fd_path, sizeof(proc_fd_path), "/proc/%d/fd/%d", getpid(), library_memfd);
-    auto remote_proc_fd_path = push_string(pid, regs, proc_fd_path);
-    if (remote_proc_fd_path == 0) {
-        return abort_injection("failed to push memfd proc path to target");
+    std::vector<long> args;
+    auto remote_lib_path = push_string(pid, regs, lib_path);
+    if (remote_lib_path == 0) {
+        return abort_injection("failed to push library path to target");
     }
-    std::vector<long> args{(long) remote_proc_fd_path, O_RDONLY};
-    auto open_result =
-        remote_call(pid, regs, (uintptr_t) open_addr, (uintptr_t) libc_return_addr, args);
-    if (open_result == 0 || open_result == static_cast<uintptr_t>(-1)) {
-        return abort_injection("remote open() of library memfd failed in target process");
-    }
-    int remote_fd = static_cast<int>(open_result);
-    LOGV("duplicated library memfd into target as fd %d", remote_fd);
-
-    // Remotely call android_dlopen_ext(name, RTLD_NOW, &extinfo) with
-    // ANDROID_DLEXT_USE_LIBRARY_FD, loading from the fd instead of a path.
-    LOGV("executing remote call to android_dlopen_ext via fd %d", remote_fd);
-    auto dlopen_ext_addr = find_func_addr(local_map, map, "libdl.so", "android_dlopen_ext");
-    if (dlopen_ext_addr == nullptr) {
-        return abort_injection("could not find address of android_dlopen_ext in the target process");
-    }
-
-    android_dlextinfo extinfo{};
-    extinfo.flags = ANDROID_DLEXT_USE_LIBRARY_FD;
-    extinfo.library_fd = remote_fd;
-    auto remote_extinfo = push_bytes(pid, regs, &extinfo, sizeof(extinfo));
-    if (remote_extinfo == 0) {
-        return abort_injection("failed to push android_dlextinfo to target");
-    }
-    auto remote_name = push_string(pid, regs, "libzygisk.so");
-    if (remote_name == 0) {
-        return abort_injection("failed to push library name to target");
-    }
-
-    args.clear();
-    args.push_back((long) remote_name);
+    args.push_back((long) remote_lib_path);
     args.push_back((long) RTLD_NOW);
-    args.push_back((long) remote_extinfo);
-    auto remote_handle = remote_call(pid, regs, (uintptr_t) dlopen_ext_addr,
-                                     (uintptr_t) libc_return_addr, args);
+    auto remote_handle =
+        remote_call(pid, regs, (uintptr_t) dlopen_addr, (uintptr_t) libc_return_addr, args);
 
     if (remote_handle == 0) {
-        LOGE("remote call to android_dlopen_ext failed, retrieving error message with dlerror");
+        LOGE("remote call to dlopen failed, retrieving error message with dlerror");
+
+        // Probe whether the target can even see the file. dlopen() reports a
+        // bare "library ... not found" both when the path is invisible to the
+        // target (mount namespace / SELinux) and when the linker's namespace
+        // rules reject an otherwise-readable path -- this distinguishes them.
+        if (auto access_addr = find_func_addr(local_map, map, "libc.so", "access");
+            access_addr != nullptr) {
+            args.clear();
+            args.push_back((long) remote_lib_path);
+            args.push_back(R_OK);
+            auto access_ret =
+                remote_call(pid, regs, (uintptr_t) access_addr, (uintptr_t) libc_return_addr, args);
+            LOGE("target-side access(\"%s\", R_OK) returned %ld (0 = readable by target)", lib_path,
+                 (long) access_ret);
+        }
+
         auto dlerror_addr = find_func_addr(local_map, map, "libdl.so", "dlerror");
         if (dlerror_addr == nullptr) {
             return abort_injection("could not find address of dlerror; cannot retrieve error string");
@@ -359,15 +285,9 @@ bool inject_on_main(int pid, const char *lib_path) {
         read_proc(pid, (uintptr_t) dlerror_str_addr, err.data(), dlerror_len);
         LOGE("dlopen error: %s", err.c_str());
         set_regs(pid, backup);
-        close(library_memfd);
         return false;
     }
-    LOGI("successfully loaded library via remote android_dlopen_ext, handle: 0x%" PRIxPTR,
-         remote_handle);
-    // The target now holds its own independent fd/mapping; close ours and mark
-    // it closed so abort_injection() below won't double-close it.
-    close(library_memfd);
-    library_memfd = -1;
+    LOGI("successfully loaded library via remote dlopen, handle: 0x%" PRIxPTR, remote_handle);
 
     // Remotely call dlsym(handle, "entry")
     LOGV("executing remote call to dlsym to find the 'entry' symbol");

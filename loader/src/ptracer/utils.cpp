@@ -283,22 +283,6 @@ uintptr_t push_string(int pid, struct user_regs_struct &regs, const char *str) {
 }
 
 /**
- * @brief Pushes an arbitrary byte buffer onto the remote process's stack.
- * @return The address of the buffer in the remote process, or 0 on failure.
- */
-uintptr_t push_bytes(int pid, struct user_regs_struct &regs, const void *data, size_t len) {
-    regs.REG_SP -= len;
-    align_stack(regs);  // Re-align after subtracting length.
-
-    uintptr_t remote_addr = regs.REG_SP;
-    if (write_proc(pid, remote_addr, data, len) != static_cast<ssize_t>(len)) {
-        LOGE("failed to write %zu bytes to remote process", len);
-        return 0;  // Return 0 on failure.
-    }
-    return remote_addr;
-}
-
-/**
  * @brief Executes a function in the remote process.
  *
  * This function is highly architecture-specific. It works by:
