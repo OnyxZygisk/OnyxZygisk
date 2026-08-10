@@ -3,4 +3,4 @@ name=${moduleName}
 version=${versionName}
 versionCode=${versionCode}
 author=Sai, Matsuzaka Yuki
-description=Zygote injection via ptrace, with FN (Functional Node) modules and a built-in WebUI.
+description=🧬 ptrace-powered Zygisk runtime · Root-agnostic · WebUI · FN modules · Hot-plug · Mount isolation
