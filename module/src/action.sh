@@ -1,29 +1,48 @@
 #!/system/bin/sh
-# OnyxZygisk module action: print a clean, human-readable status.
-# The ptrace monitor appends its live status to module.prop with every line
-# tab-prefixed, so a plain `cat` would dump a wall of mangled text. Instead we
-# split it into module metadata ("key=value") and the monitor status rows.
+# ==============================================================================
+# OnyxZygisk · Module action
+#
+# Presents the installed metadata and live monitor state as a compact status
+# card. The monitor file intentionally contains both `key=value` metadata and
+# tab-indented runtime rows, so it is formatted here instead of printed raw.
+# ==============================================================================
 
-printf "Status of OnyxZygisk\n\n"
+MODDIR=${0%/*}
+LIVE_PROP=@WORK_DIRECTORY@/module.prop
+MODULE_PROP="$MODDIR/module.prop"
 
-PROP=@WORK_DIRECTORY@/module.prop
+read_prop() {
+  sed -n "s/^$1=//p" "$MODULE_PROP" 2>/dev/null | head -n 1
+}
 
-if [ ! -f "$PROP" ]; then
-  echo "  (module.prop not found)"
+print_row() {
+  printf '│  %-10s %s\n' "$1" "$2"
+}
+
+printf '\n╭─ 🧬 OnyxZygisk · Runtime Overview\n'
+printf '├─ Module\n'
+print_row "Name" "$(read_prop name)"
+print_row "Version" "$(read_prop version)"
+print_row "Module ID" "$(read_prop id)"
+print_row "Authors" "$(read_prop author)"
+printf '├─ Runtime\n'
+
+if [ ! -f "$LIVE_PROP" ]; then
+  print_row "Runtime" "status is not available yet"
 else
-  echo "Module:"
-  grep -E '^[[:blank:]]*[a-zA-Z][a-zA-Z0-9_]*=' "$PROP" | sed -E 's/^[[:blank:]]+//'
-  echo
-  echo "Monitor:"
-  grep -Ev '^[[:blank:]]*[a-zA-Z][a-zA-Z0-9_]*=|^[[:blank:]]*=' "$PROP" | grep -v '^[[:blank:]]*$' | sed -E 's/^[[:blank:]]+//; s/:[[:blank:]]+/: /' | awk '{ print length($0), $0 }' | sort -n | cut -d' ' -f2-
+  grep -Ev '^[[:blank:]]*[a-zA-Z][a-zA-Z0-9_]*=|^[[:blank:]]*=' "$LIVE_PROP" |
+    sed -E 's/^[[:blank:]]+//; s/:[[:blank:]]+/: /' |
+    while IFS= read -r row; do
+      [ -n "$row" ] && printf '│  %s\n' "$row"
+    done
 fi
 
-echo
-echo "WebUI (webroot): /data/adb/modules/onyxzygisk/webroot/"
-echo "  Open the WebUI from the module page in KernelSU / APatch Manager or MMRL"
-echo "  (The page is read directly by the Manager's WebView; no network or port is needed)"
+printf '├─ WebUI\n'
+print_row "WebUI" "Open from your root manager or MMRL"
+print_row "Path" "/data/adb/modules/onyxzygisk/webroot"
+printf '╰─ No network port required\n\n'
 
 if [ -z "$MMRL" ] && { [ -n "$KSU" ] || [ -n "$APATCH" ]; }; then
-	# Avoid instant exit on KernelSU or APatch
-	sleep 5
+  # Keep the action window visible when the manager closes it immediately.
+  sleep 5
 fi

@@ -1,8 +1,11 @@
 #!/system/bin/sh
-# KernelSU LKM late-load mode: this runs INSTEAD of post-fs-data.sh, because
-# by the time a late-loaded KernelSU exists, the real post-fs-data boot stage
-# has already passed without it. service.sh and boot-completed.sh still fire
-# normally afterwards through KSU's regular stage sequence.
+# ==============================================================================
+# OnyxZygisk · KernelSU LKM late-load entry
+#
+# A late-loaded KernelSU appears after post-fs-data has already passed, so this
+# entry invokes the shared bootstrap directly. Later lifecycle stages continue
+# through KernelSU's normal service sequence.
+# ==============================================================================
 
 MODDIR=${0%/*}
 cd "$MODDIR"

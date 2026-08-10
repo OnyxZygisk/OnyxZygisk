@@ -1,4 +1,10 @@
 #!/system/bin/sh
+# ==============================================================================
+# OnyxZygisk · post-fs-data stage
+#
+# Starts the runtime and mirrors the lifecycle scripts of classic Zygisk
+# modules when Magisk's built-in Zygisk is not driving them.
+# ==============================================================================
 
 MODDIR=${0%/*}
 if [ "$ZYGISK_ENABLED" ]; then
@@ -20,4 +26,5 @@ if [ "$(which magisk)" ]; then
   done
 fi
 
+# Enter the shared bootstrap used by both normal and late-load startup.
 . "$MODDIR/zygisk-init.sh"
