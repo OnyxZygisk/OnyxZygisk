@@ -1,63 +1,102 @@
 <div align="center">
 
-<img src="assets/tux.png" alt="OnyxZygisk" width="96">
+<img src="assets/tux.png" alt="OnyxZygisk" width="128">
 
 # OnyxZygisk
 
-A **ptrace-based Zygisk implementation** for **APatch** & **KernelSU** — with a built-in **WebUI** and **FN (Functional Node)** modules.
+**The Zygisk runtime that just works — on every root.**
+
+A ptrace-powered Zygisk implementation with a built-in WebUI, hot-swappable FN modules, and an advanced DenyList. No kernel module required.
+
+[![Telegram](https://img.shields.io/badge/Telegram-OnyxZygisk-2CA5E0?logo=telegram&logoColor=white)](https://t.me/OnyxZygisk)
+[![Release](https://img.shields.io/github/v/release/OnyxZygisk/OnyxZygisk?label=Latest&color=brightgreen)](https://github.com/OnyxZygisk/OnyxZygisk/releases/latest)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
 **English** · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md)
-
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
 </div>
 
 ---
 
-## Highlights
+## Why OnyxZygisk?
 
-- **Built-in WebUI** — a control panel built with **Vue 3 + Vite + TypeScript**, shipped as static files in `webroot/` and opened directly by KernelSU / APatch Manager / MMRL. Dashboard, module list, FN management, and a logcat viewer. Light / dark / AMOLED themes and multi-language. See [docs/WEBUI.md](docs/WEBUI.md).
-- **FN (Functional Node) modules** — declarative, scoped, hot-swappable extension units on top of the Zygisk core: script nodes and native nodes, enabled/disabled without a reboot. See [docs/FN.md](docs/FN.md).
-- **APatch-first** — `apd` detection, real-CSV `package_config` parsing and atomic writes, clean-namespace unmounting across known root overlay sources. See [docs/APATCH.md](docs/APATCH.md).
-- **Advanced stealth** — a sophisticated DenyList that hides root and module traces from apps that look for them.
+### Root-agnostic
 
-## The DenyList
+Works out of the box on **APatch**, **KernelSU** (including LKM late-load), and **Magisk**. Switch root solutions without switching your Zygisk — one module covers them all.
 
-Modern systemless root works by stacking overlay [mounts](https://man7.org/linux/man-pages/man8/mount.8.html) rather than touching system partitions. The DenyList hides those modifications by controlling each app's [mount namespace](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html):
+### Zero-reboot workflow
 
-| Application state | Mount namespace | Use case |
-| :--- | :--- | :--- |
-| **Root granted** | Root + module mounts | Trusted apps that need full root (e.g. advanced file managers). |
-| **On DenyList** | Clean, unmodified | A pristine environment for apps that perform root detection. |
+- **Hot-plug** — enable or disable Zygisk modules without rebooting.
+- **FN modules** — declarative, scoped, hot-swappable extension nodes that take effect on the next app launch. [Learn more →](docs/FN.md)
 
-Two strategies produce the clean namespace:
+### Built-in WebUI
 
-1. **Direct zygote unmounting (primary)** — unmount root traces directly from the zygote *before* an app is specialized. Aborted by a safety check if a module provides critical system resources (e.g. an overlay in `/product`), to avoid crashing zygote.
-2. **Namespace switching (fallback)** — after fork, `setns` moves the app into a cached, completely clean mount namespace.
+A full control panel built with Vue 3 + Vite + TypeScript, served locally by KernelSU / APatch Manager / MMRL — no network port, no server process. Dashboard, module list, FN management, logcat viewer. Light / Dark / AMOLED themes. [Learn more →](docs/WEBUI.md)
 
-## Configuration
+### Advanced stealth
 
-- **APatch / KernelSU:** enable **`Umount modules`** for the target app.
-- **Magisk:** use **`Configure DenyList`**. Leave Magisk's own **`Enforce DenyList`** *off* — it can conflict with OnyxZygisk's hiding.
+A two-layer DenyList that keeps root invisible to detection-hardened apps:
 
-## Building from source
+| Strategy | How it works |
+| :--- | :--- |
+| **Zygote unmount** (primary) | Strips root and module mounts from zygote *before* the app process is specialised. |
+| **Namespace switch** (fallback) | Moves the forked app into a cached, completely clean mount namespace via `setns`. |
+
+No traces in `/proc/self/maps`, no leaked mount points, no stale file descriptors.
+
+### Userspace-only, no kernel module
+
+Pure ptrace injection — no custom kernel module to build, maintain, or break on kernel updates. Works on any kernel that supports `PTRACE_SEIZE`.
+
+---
+
+## Quick start
+
+### Install
+
+Flash the zip from the [latest release](https://github.com/OnyxZygisk/OnyxZygisk/releases/latest) in your root manager (APatch / KernelSU / Magisk) and reboot.
+
+### Configure the DenyList
+
+| Root solution | Where to enable |
+| :--- | :--- |
+| **APatch / KernelSU** | Enable **Umount modules** for the target app |
+| **Magisk** | **Configure DenyList** (keep Magisk's own *Enforce DenyList* **off**) |
+
+### Open the WebUI
+
+Open the module page in KernelSU Manager, APatch Manager, or MMRL and tap **WebUI**.
+
+---
+
+## Build from source
 
 ```sh
-git clone https://github.com/GG-Linux/OnyxZygisk.git
+git clone https://github.com/OnyxZygisk/OnyxZygisk.git
 cd OnyxZygisk
 ./gradlew :module:zipRelease
 ```
 
-The flashable zip is written to `module/build/outputs/module/`.
+The flashable zip is written to `module/build/outputs/release/`.
+
+---
+
+## Community
+
+[![Telegram Channel](https://img.shields.io/badge/Telegram-OnyxZygisk-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/OnyxZygisk)
+
+Join the Telegram channel for release announcements, discussion, and support.
+
+---
 
 ## Credits
 
-OnyxZygisk stands on the shoulders of the projects it is built from and inspired by:
+OnyxZygisk is built on and inspired by:
 
 - **Zygisk API** — [topjohnwu](https://github.com/topjohnwu) / [Magisk](https://github.com/topjohnwu/Magisk)
-- **Zygisk Next** (standalone ptrace implementation) — [Dr-TSNG](https://github.com/Dr-TSNG/ZygiskNext)
-- **NeoZygisk** (OnyxZygisk is based on this) — [JingMatrix](https://github.com/JingMatrix/NeoZygisk)
-- **OnyxZygisk** — Sai, Matsuzaka Yuki, and [contributors](https://github.com/GG-Linux/OnyxZygisk/graphs/contributors)
+- **Zygisk Next** — [Dr-TSNG](https://github.com/Dr-TSNG/ZygiskNext)
+- **NeoZygisk** — [JingMatrix](https://github.com/JingMatrix/NeoZygisk)
+- **OnyxZygisk** — Sai, Matsuzaka Yuki, and [contributors](https://github.com/OnyxZygisk/OnyxZygisk/graphs/contributors)
 
 ## License
 
