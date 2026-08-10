@@ -1,64 +1,103 @@
 <div align="center">
 
-<img src="assets/tux.png" alt="OnyxZygisk" width="96">
+<img src="assets/tux.png" alt="OnyxZygisk" width="128">
 
 # OnyxZygisk
 
-面向 **APatch** 与 **KernelSU** 的**基于 ptrace 的 Zygisk 实现** —— 内置 **WebUI** 与 **FN(Functional Node)模块**。
+**开箱即用的 Zygisk 运行时 —— 全 Root 方案通用。**
+
+基于 ptrace 的 Zygisk 实现，内置 WebUI、可热插拔的 FN 模块和进阶 DenyList。无需内核模块。
+
+[![Telegram](https://img.shields.io/badge/Telegram-OnyxZygisk-2CA5E0?logo=telegram&logoColor=white)](https://t.me/OnyxZygisk)
+[![Release](https://img.shields.io/github/v/release/OnyxZygisk/OnyxZygisk?label=最新版&color=brightgreen)](https://github.com/OnyxZygisk/OnyxZygisk/releases/latest)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
 [English](README.md) · **简体中文** · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md)
-
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
 </div>
 
 ---
 
-## 亮点
+## 为什么选择 OnyxZygisk？
 
-- **内置 WebUI** —— 基于 **Vue 3 + Vite + TypeScript** 的控制面板，以静态文件随 `webroot/` 提供，可在 KernelSU / APatch Manager / MMRL 中直接打开。包含仪表盘、模块列表、FN 管理、logcat 查看器。支持浅色 / 深色 / 纯黑主题与多语言。详见 [docs/WEBUI.md](docs/WEBUI.md)。
-- **FN(Functional Node)模块** —— 位于 Zygisk 核心之上的声明式、按作用域、可热插拔的扩展单元:脚本节点与原生节点,无需重启即可启用/禁用。详见 [docs/FN.md](docs/FN.md)。
-- **APatch 优先适配** —— `apd` 检测、真实 CSV 的 `package_config` 解析与原子写入、覆盖已知 root overlay 来源的干净命名空间卸载。详见 [docs/APATCH.md](docs/APATCH.md)。
-- **进阶隐藏** —— 精细的 DenyList,对进行 root 检测的应用隐藏 root 与模块痕迹。
+### Root 方案无关
 
-## DenyList 说明
+开箱兼容 **APatch**、**KernelSU**（含 LKM 延迟加载）和 **Magisk**。更换 Root 方案无需更换 Zygisk —— 一个模块全部搞定。
 
-现代 systemless root 通过叠加 overlay [挂载](https://man7.org/linux/man-pages/man8/mount.8.html)工作,而非直接改动系统分区。DenyList 通过控制每个应用的[挂载命名空间](https://man7.org/linux/man-pages/man7/mount_namespaces.7.html)来隐藏这些改动:
+### 零重启工作流
 
-| 应用状态 | 挂载命名空间 | 适用场景 |
-| :--- | :--- | :--- |
-| **已授予 Root** | Root + 模块挂载 | 需要完整 root 的可信应用(如高级文件管理器)。 |
-| **在 DenyList** | 干净、未修改 | 为进行 root 检测的应用提供纯净环境。 |
+- **热插拔** —— 启用或禁用 Zygisk 模块无需重启。
+- **FN 模块** —— 声明式、按作用域、可热插拔的扩展节点，下次应用启动即刻生效。[了解更多 →](docs/FN.md)
 
-产生干净命名空间的两种策略:
+### 内置 WebUI
 
-1. **直接从 zygote 卸载(主策略)** —— 在应用被 specialize *之前*,直接从 zygote 卸载 root 痕迹。若某模块提供关键系统资源(如 `/product` 的 overlay),安全检查会中止此操作以免 zygote 崩溃。
-2. **命名空间切换(回退策略)** —— fork 之后,用 `setns` 将应用切换进一个缓存好的、完全干净的挂载命名空间。
+基于 Vue 3 + Vite + TypeScript 构建的完整控制面板，由 KernelSU / APatch Manager / MMRL 本地读取 —— 无需网络端口，无需服务进程。仪表盘、模块列表、FN 管理、logcat 查看器。浅色 / 深色 / 纯黑主题。[了解更多 →](docs/WEBUI.md)
 
-## 配置
+### 进阶隐藏
 
-- **APatch / KernelSU:** 为目标应用启用 **`卸载模块 / Umount modules`**。
-- **Magisk:** 使用 **`配置 DenyList`**。请**关闭** Magisk 自带的 **`强制 DenyList`** —— 它可能与 OnyxZygisk 的隐藏机制冲突。
+双层 DenyList，让 Root 痕迹对检测类应用完全不可见：
+
+| 策略 | 工作原理 |
+| :--- | :--- |
+| **Zygote 卸载**（主策略） | 在应用进程 specialize *之前*，从 zygote 剥离 root 与模块挂载。 |
+| **命名空间切换**（回退） | fork 后通过 `setns` 将应用移入缓存好的、完全干净的挂载命名空间。 |
+
+`/proc/self/maps` 无痕迹、无泄漏的挂载点、无残留的文件描述符。
+
+### 纯用户态，无内核模块
+
+纯 ptrace 注入 —— 无需构建、维护或在内核更新后修复自定义内核模块。支持所有启用 `PTRACE_SEIZE` 的内核。
+
+---
+
+## 快速上手
+
+### 安装
+
+从[最新 Release](https://github.com/OnyxZygisk/OnyxZygisk/releases/latest) 下载 zip，在 Root 管理器（APatch / KernelSU / Magisk）中刷入并重启。
+
+### 配置 DenyList
+
+| Root 方案 | 操作位置 |
+| :--- | :--- |
+| **APatch / KernelSU** | 为目标应用启用 **卸载模块** |
+| **Magisk** | **配置 DenyList**（保持 Magisk 自带的"强制 DenyList"**关闭**） |
+
+### 打开 WebUI
+
+在 KernelSU Manager、APatch Manager 或 MMRL 中打开模块页面，点击 **WebUI**。
+
+---
 
 ## 从源码构建
 
 ```sh
-git clone https://github.com/GG-Linux/OnyxZygisk.git
+git clone https://github.com/OnyxZygisk/OnyxZygisk.git
 cd OnyxZygisk
 ./gradlew :module:zipRelease
 ```
 
-可刷入的 zip 输出到 `module/build/outputs/module/`。
+可刷入的 zip 输出到 `module/build/outputs/release/`。
+
+---
+
+## 社区
+
+[![Telegram Channel](https://img.shields.io/badge/Telegram-OnyxZygisk-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/OnyxZygisk)
+
+加入 Telegram 频道，获取版本发布公告、讨论与技术支持。
+
+---
 
 ## 致谢
 
-OnyxZygisk 站在它所构建于、所受启发的项目的肩膀上:
+OnyxZygisk 基于以下项目构建并受其启发：
 
 - **Zygisk API** —— [topjohnwu](https://github.com/topjohnwu) / [Magisk](https://github.com/topjohnwu/Magisk)
-- **Zygisk Next**(独立 ptrace 实现)—— [Dr-TSNG](https://github.com/Dr-TSNG/ZygiskNext)
-- **NeoZygisk**(OnyxZygisk 基于此)—— [JingMatrix](https://github.com/JingMatrix/NeoZygisk)
-- **OnyxZygisk** —— Sai, Matsuzaka Yuki 与[贡献者们](https://github.com/GG-Linux/OnyxZygisk/graphs/contributors)
+- **Zygisk Next** —— [Dr-TSNG](https://github.com/Dr-TSNG/ZygiskNext)
+- **NeoZygisk** —— [JingMatrix](https://github.com/JingMatrix/NeoZygisk)
+- **OnyxZygisk** —— Sai, Matsuzaka Yuki 与[贡献者们](https://github.com/OnyxZygisk/OnyxZygisk/graphs/contributors)
 
 ## 许可证
 
-[AGPL-3.0](LICENSE)。OnyxZygisk 是 NeoZygisk 的下游,沿用相同的许可证与声明。
+[AGPL-3.0](LICENSE)。OnyxZygisk 是 NeoZygisk (GPL-3.0) 的下游，集成了 CSOLoader (AGPL-3.0) 作为进程内自定义模块加载器；依据 GPL-3.0 §13，组合作品以 AGPL-3.0 发布。上游 GPL-3.0 声明保留 —— 详见 [NOTICE.md](NOTICE.md)。
