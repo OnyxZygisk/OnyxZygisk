@@ -15,11 +15,11 @@ val gitCommitHash = "git rev-parse --verify --short HEAD".execute()
 
 val moduleId by extra("onyxzygisk")
 val moduleName by extra("OnyxZygisk")
-// Hot-plug restart-loop hotfix. Keep this build distinguishable from the
-// earlier v1.0.5-368 archives: root-manager/WebView caches and repeated local
+// Hot-plug boot-health hotfix. Keep this build distinguishable from the
+// earlier v1.06-369 archive: root-manager/WebView caches and repeated local
 // filenames made it too easy to flash an older binary while testing fixes.
-val verName by extra("v1.0.6")
-val verCode by extra(gitCommitCount + 1)
+val verName by extra("v1.07")
+val verCode by extra(gitCommitCount + 3)
 val commitHash by extra(gitCommitHash)
 val minAPatchVersion by extra(10762)
 val minKsuVersion by extra(10940)

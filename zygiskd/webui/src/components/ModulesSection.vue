@@ -65,8 +65,8 @@ async function toggleHotplug(m: ModuleInfo, enabled: boolean) {
                 <span v-else-if="!hotplug" class="mod-row__hotplug-off">{{ t("modules.hotplugOff") }}</span>
               </span>
               <Switch
-                :checked="m.hotplugEnabled"
-                :disabled="!hotplug || m.disabled"
+                :checked="m.hotplugEnabled && !m.disabled"
+                :disabled="!hotplug"
                 @update:checked="toggleHotplug(m, $event)"
               />
             </div>

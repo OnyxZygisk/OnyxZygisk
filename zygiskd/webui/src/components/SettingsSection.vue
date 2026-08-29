@@ -42,7 +42,7 @@ async function toggleHotplug(enabled: boolean): Promise<void> {
   try {
     await setHotplugMaster(enabled);
     await load();
-  } catch (e) {
+  } catch {
     /* the next poll re-syncs the switch state */
   }
 }
@@ -51,7 +51,7 @@ async function onMountMode(e: Event): Promise<void> {
   try {
     await setMountMode((e.target as HTMLSelectElement).value as MountMode);
     await load();
-  } catch (e) {
+  } catch {
     /* the next poll re-syncs the dropdown */
   }
 }

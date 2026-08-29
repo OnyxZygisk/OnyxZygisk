@@ -1,0 +1,89 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  zigcore:
+    name: Zig core tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - name: Run Zig tests
+        working-directory: loader/zigcore
+        run: zig build test --summary all
+
+  webui:
+    name: WebUI checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: zygiskd/webui/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: zygiskd/webui
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        working-directory: zygiskd/webui
+        run: pnpm typecheck
+      - name: Unit tests
+        working-directory: zygiskd/webui
+        run: pnpm test
+      - name: Lint
+        working-directory: zygiskd/webui
+        run: pnpm lint
+
+  android:
+    name: Android release package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+      - name: Install Android toolchain
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.0
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 3.5.4 --locked
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: zygiskd/webui/pnpm-lock.yaml
+      - name: Build release module
+        env:
+          # setup-rust-toolchain enables -D warnings globally. The existing
+          # Android build is warning-clean only for its own crate flags, while
+          # dependency diagnostics are not part of this release gate.
+          RUSTFLAGS: ""
+        run: bash ./gradlew :module:zipRelease --no-daemon --console=plain
+      - name: Upload module ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: onyxzygisk-release
+          path: module/build/outputs/release/*.zip

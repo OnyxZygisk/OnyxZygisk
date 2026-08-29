@@ -14,15 +14,20 @@ if [ "$ZYGISK_ENABLED" ]; then
 fi
 
 # ── Boot-loop fail-safe: health witness ───────────────────────────────────────
-# zygisk-init.sh increments a counter on every boot; reaching this point plus
-# a grace window proves the boot was healthy, so the counter resets. A boot
-# loop kills the device before the sleep ends, the counter survives, and the
-# injection kill switch eventually latches (see zygisk-init.sh).
+# zygisk-init.sh increments a counter once per kernel boot.  Reset it as soon
+# as Android reports boot completion.  The old unconditional 120-second delay
+# falsely counted perfectly healthy boots when the user applied another
+# hot-plug change shortly after reaching the launcher.
 (
-  sleep 120
-  rm -f "@WORK_DIRECTORY@/boot_fail_count"
-  if [ -f "@WORK_DIRECTORY@/injection_disabled" ]; then
-    log -p w -t "zygisk-sh" "Boot-loop fail-safe is latched; injection stays OFF until @WORK_DIRECTORY@/injection_disabled is removed"
+  waited=0
+  while [ "$(getprop sys.boot_completed 2>/dev/null)" != "1" ] && [ "$waited" -lt 180 ]; do
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
+    rm -f "@WORK_DIRECTORY@/boot_fail_count" \
+      "@WORK_DIRECTORY@/boot_fail_boot_id"
+    log -p i -t "zygisk-sh" "Boot health confirmed; consecutive-failure counter cleared"
   fi
 ) &
 

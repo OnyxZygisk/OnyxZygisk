@@ -905,8 +905,26 @@ pub fn apply_hotplug(tmp_path: Option<&str>, name: &str) -> Result<()> {
     }
 
     let active_dir = Path::new(constants::PATH_MODULES_DIR).join(name);
-    if enabled && (active_dir.join("disable").exists() || active_dir.join("remove").exists()) {
-        bail!("module {name} is disabled or pending removal");
+    if enabled && active_dir.join("remove").exists() {
+        bail!("module {name} is pending removal");
+    }
+
+    // The hot-plug preference and the root manager's `disable` marker are
+    // separate files.  KernelSU safe mode (or a previous manual disable) can
+    // therefore leave the switch visually on while every module scan skips
+    // the library.  An explicit ON request means "make this module active",
+    // so reconcile the real module state before swapping/serving it.  The UI
+    // presents a disabled+opted-in module as unchecked, making this action an
+    // intentional second click rather than silently overriding safe mode.
+    let reenabled = enabled && active_dir.join("disable").exists();
+    if reenabled {
+        fs::remove_file(active_dir.join("disable"))
+            .with_context(|| format!("failed to re-enable module {name}"))?;
+        let _ = fs::remove_file(activation_marker(name, "crash_blocked"));
+        info!(
+            "Hot-plug: removed stale disable marker for module \"{}\"",
+            name
+        );
     }
     let mut swapped = false;
     if enabled && staged_update_ready(name) {
@@ -939,24 +957,18 @@ pub fn apply_hotplug(tmp_path: Option<&str>, name: &str) -> Result<()> {
         let _ = fs::remove_file(activation_marker(name, "applying"));
     }
 
-    // The WebUI writes the preference before invoking this CLI.  Persist the
-    // last setting that was actually applied so retries (WebView reconnect,
-    // double event delivery, or two root bridges) are idempotent and cannot
-    // restart a freshly respawned system_server again.
+    // The WebUI writes the preference before invoking this CLI.  Persist it
+    // for status/recovery, but do not use the old value to suppress an
+    // explicit request: the preference may have been changed by the restart
+    // guard or safe mode while this marker still says `1`.  That stale-state
+    // combination made turning the visible switch back on a no-op.  The
+    // per-system_server PID marker in reboot_device_to_activate provides the
+    // correct idempotency for duplicate bridge deliveries.
     let state_marker = activation_marker(name, "state");
     let target_state = if enabled { "1" } else { "0" };
-    let previous_state = fs::read_to_string(&state_marker).unwrap_or_default();
-    let state_changed = swapped || previous_state.trim() != target_state;
     fs::write(&state_marker, target_state.as_bytes())?;
 
     refresh_controller_info();
-    if !state_changed {
-        info!(
-            "Hot-plug: module \"{}\" is already in the requested state; skipping duplicate restart",
-            name
-        );
-        return Ok(());
-    }
     if !reboot_device_to_activate(name, true) {
         bail!("device could not be rebooted to apply the change");
     }
@@ -1014,6 +1026,16 @@ fn hotplug_restart_guard() -> PathBuf {
     Path::new(TMP_PATH.get().unwrap()).join("hotplug_restart_guard")
 }
 
+/// Stable identifier for the current kernel boot.  Unlike process IDs this
+/// cannot accidentally compare equal across two reboots, and both ABI daemon
+/// instances see the same value.
+fn current_boot_id() -> Option<String> {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && !value.contains(':'))
+}
+
 /// Startup half of the hot-plug circuit breaker.
 ///
 /// `handle_hotplug_restart_guard` can only advance while the daemon is alive
@@ -1021,14 +1043,24 @@ fn hotplug_restart_guard() -> PathBuf {
 /// guard the previous session left behind (post-fs-data deliberately no
 /// longer deletes it):
 ///
-/// - `rebooting` — this boot IS the intentional cold reboot that activates
-///   the module.  Keep the module active and advance to `confirming`; the
-///   first SystemServerStarted of this boot will move it to `observing`.
+/// The guard contains the kernel boot UUID, so the 32-bit and 64-bit daemons
+/// can distinguish "another daemon started in this boot" from "the device
+/// booted again".  Without it, daemon #1 changed `rebooting` to `confirming`
+/// and daemon #2 immediately treated that as a second reboot and unplugged
+/// the module.
+///
+/// - `rebooting` — on the first *different* boot, keep the module active and
+///   advance to `confirming`; the first SystemServerStarted of this boot will
+///   move it to `observing`.
+///   Also clear the `restarted` marker here: it was written by the previous
+///   session to dedupe the reboot request, and the reboot has now happened,
+///   so leaving it would make a later apply_hotplug no-op even though the
+///   module is only just being activated this boot.
 /// - `confirming` — the device rebooted AGAIN before the framework ever
 ///   confirmed itself: the module broke the boot path (e.g. a zygote crash
 ///   escalated by init).  Unplug it before its library is served anywhere.
-/// - `armed`/`observing` — a full reboot crossed the restart/stability
-///   window (crash evidence, e.g. `zygote reboot by service`).  Unplug.
+/// - `observing` — a full reboot crossed the restart/stability window
+///   (crash evidence, e.g. `zygote reboot by service`).  Unplug.
 ///
 /// Better one false positive (the user re-enables the switch) than an
 /// infinite boot loop.
@@ -1037,22 +1069,58 @@ fn resolve_stale_restart_guard() {
     let Ok(content) = fs::read_to_string(&guard) else {
         return; // No guard: the previous session ended cleanly.
     };
-    let mut parts = content.trim().splitn(3, ':');
+    let Some(boot_id) = current_boot_id() else {
+        // Never disable a module merely because the kernel boot identity was
+        // unavailable.  The live PID-based guard still handles framework
+        // restarts inside this boot.
+        warn!("Hot-plug: kernel boot id is unavailable; skipping cross-boot guard resolution");
+        return;
+    };
+    let mut parts = content.trim().split(':');
     let (stage, name) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-    let recorded_pid = parts.next().unwrap_or("").trim();
+    let recorded_boot = parts.next().unwrap_or("").trim();
     if !valid_module_id(name) {
         let _ = fs::remove_file(&guard);
         return;
     }
+
+    // v1.0.6 initially stored only a decimal system_server PID.  It cannot
+    // identify a boot reliably, so discard that legacy guard instead of
+    // falsely unplugging a healthy module after upgrading this fix.
+    if recorded_boot.parse::<i32>().is_ok() || recorded_boot.is_empty() {
+        warn!(
+            "Hot-plug: discarding legacy restart guard for module \"{}\"",
+            name
+        );
+        let _ = fs::remove_file(&guard);
+        let _ = fs::remove_file(activation_marker(name, "restarted"));
+        return;
+    }
     match stage {
         "rebooting" => {
+            if recorded_boot == boot_id {
+                // The reboot command was issued in this boot and another ABI
+                // daemon reached startup before shutdown completed.
+                return;
+            }
             info!(
                 "Hot-plug: booting to activate module \"{}\"; awaiting framework confirmation",
                 name
             );
-            let _ = fs::write(&guard, format!("confirming:{name}:{recorded_pid}").as_bytes());
+            // The cold reboot requested by the previous session has now
+            // happened, so the `restarted` marker it wrote to dedupe that
+            // request is no longer meaningful.  Clear it so a later
+            // apply_hotplug on this boot (WebUI reconnect, root bridge
+            // reattach) can re-arm if needed instead of no-oping on the
+            // stale marker.
+            let _ = fs::remove_file(activation_marker(name, "restarted"));
+            let _ = fs::write(&guard, format!("confirming:{name}:{boot_id}").as_bytes());
         }
-        "confirming" | "armed" | "observing" => {
+        "confirming" | "observing" if recorded_boot == boot_id => {
+            // A second ABI daemon (or a daemon restart) in the same kernel
+            // boot is not crash evidence.  Leave the live guard untouched.
+        }
+        "confirming" | "observing" => {
             error!(
                 "Hot-plug: restart guard \"{}:{}\" survived a reboot; unplugging module \"{}\" as the likely crash cause",
                 stage, name, name
@@ -1074,10 +1142,17 @@ fn resolve_stale_restart_guard() {
 
 /// Circuit breaker for a module that makes system_server crash immediately
 /// after hot-plugging.  The first SystemServerStarted after our intentional
-/// reboot (guard stage `armed` from older builds, `rebooting`/`confirming`
-/// now) begins a stability window.  A second, different PID inside that
-/// window means the framework restarted again without a user request: unplug
-/// the module before allowing another specialize so the device can recover.
+/// cold reboot (guard stage `rebooting`/`confirming`) begins a stability
+/// window.  A second, different PID inside that window means the framework
+/// restarted again without a user request: unplug the module so the device
+/// can recover on the next (user-initiated) reboot.
+///
+/// NOTE: the old soft-restart path used to SIGKILL system_server here to
+/// force a respawn from the now-unplugged module list.  With the cold-reboot
+/// activation model that is wrong — killing system_server IS a soft restart,
+/// which is exactly what we are trying to avoid.  The unplugged module is
+/// already gone from the active list, so the next ordinary app fork will be
+/// served without it; no kill is needed or safe.
 fn handle_hotplug_restart_guard() {
     let guard = hotplug_restart_guard();
     let Ok(contents) = fs::read_to_string(&guard) else {
@@ -1086,7 +1161,11 @@ fn handle_hotplug_restart_guard() {
     let mut parts = contents.trim().split(':');
     let Some(stage) = parts.next() else { return };
     let Some(name) = parts.next() else { return };
-    let Some(recorded_pid) = parts.next().and_then(|p| p.parse::<i32>().ok()) else {
+    let Some(recorded_boot) = parts.next() else {
+        return;
+    };
+    let recorded_pid = parts.next().and_then(|p| p.parse::<i32>().ok());
+    let Some(boot_id) = current_boot_id() else {
         return;
     };
     if !valid_module_id(name) {
@@ -1097,57 +1176,68 @@ fn handle_hotplug_restart_guard() {
         return;
     };
 
-    if matches!(stage, "armed" | "rebooting" | "confirming") {
-        if current_pid == recorded_pid {
+    if stage == "rebooting" {
+        // Still in the boot that requested the cold reboot.  Do not turn an
+        // unrelated SystemServerStarted event into a successful activation.
+        if recorded_boot == boot_id {
             return;
         }
-        let observing = format!("observing:{name}:{current_pid}");
+    } else if stage != "confirming" || recorded_boot != boot_id {
+        if stage != "observing" || recorded_boot != boot_id || recorded_pid == Some(current_pid) {
+            return;
+        }
+
+        warn!(
+            "Hot-plug: detected system_server restart loop after activating \"{}\"; automatically unplugging it",
+            name
+        );
+        let _ = fs::remove_file(
+            Path::new(TMP_PATH.get().unwrap())
+                .join("hotplug")
+                .join(name),
+        );
+        let _ = fs::write(activation_marker(name, "state"), b"0");
+        let _ = fs::write(activation_marker(name, "crash_blocked"), b"1");
+        let _ = fs::remove_file(&guard);
+        refresh_controller_info();
+        return;
+    }
+
+    // `confirming` belongs to this boot (or `rebooting` was recovered before
+    // startup resolution).  PID values commonly repeat across cold boots, so
+    // the boot UUID, not PID inequality, is what proves activation booted.
+    {
+        let observing = format!("observing:{name}:{boot_id}:{current_pid}");
         if fs::write(&guard, observing.as_bytes()).is_err() {
             return;
         }
         let guard_clone = guard.clone();
         let name_clone = name.to_string();
+        let boot_clone = boot_id;
+        let pid_clone = current_pid;
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(30));
-            let expected = format!("observing:{name_clone}:{current_pid}");
+            let expected = format!("observing:{name_clone}:{boot_clone}:{pid_clone}");
             if fs::read_to_string(&guard_clone)
                 .map(|value| value.trim() == expected)
                 .unwrap_or(false)
-                && pidof_system_server() == Some(current_pid)
+                && pidof_system_server() == Some(pid_clone)
             {
+                // Activation succeeded and the framework stayed up.  Clear
+                // the restart marker too so a later apply_hotplug (WebUI
+                // reconnect, root bridge reattach) does not no-op on the
+                // stale `restarted` marker and can re-arm if the user
+                // toggles the module again.
                 let _ = fs::remove_file(&guard_clone);
+                let _ = fs::remove_file(activation_marker(&name_clone, "restarted"));
                 info!(
-                    "Hot-plug: system_server pid {} remained stable after activating \"{}\"",
-                    current_pid, name_clone
+                    "Hot-plug: system_server pid {} remained stable after activating \"{}\"; restart marker cleared",
+                    pid_clone, name_clone
                 );
             }
         });
         return;
     }
-
-    if stage != "observing" || current_pid == recorded_pid {
-        return;
-    }
-
-    warn!(
-        "Hot-plug: detected system_server restart loop after activating \"{}\"; automatically unplugging it",
-        name
-    );
-    let _ = fs::remove_file(
-        Path::new(TMP_PATH.get().unwrap())
-            .join("hotplug")
-            .join(name),
-    );
-    let _ = fs::write(activation_marker(name, "state"), b"0");
-    let _ = fs::write(activation_marker(name, "crash_blocked"), b"1");
-    let _ = fs::remove_file(&guard);
-    refresh_controller_info();
-
-    // This instance was already specialized with the bad module before it
-    // could report SystemServerStarted.  Terminate it once; the following
-    // instance is served from the now-unplugged module list and the guard is
-    // gone, so this cannot form another Onyx-triggered loop.
-    let _ = unsafe { libc::kill(current_pid, libc::SIGKILL) };
 }
 
 /// Activate a freshly hot-plugged framework module (LSPosed) by rebooting
@@ -1205,7 +1295,12 @@ fn reboot_device_to_activate(name: &str, force: bool) -> bool {
             // turns this into "confirming" at the next boot, so only a
             // framework that then fails to stabilize gets the module
             // unplugged.
-            let guard = format!("rebooting:{name}:{pid}");
+            let Some(boot_id) = current_boot_id() else {
+                let _ = fs::remove_file(&marker);
+                warn!("Hot-plug: kernel boot id is unavailable; refusing an unguarded reboot");
+                return false;
+            };
+            let guard = format!("rebooting:{name}:{boot_id}:{pid}");
             if fs::write(hotplug_restart_guard(), guard.as_bytes()).is_err() {
                 let _ = fs::remove_file(&marker);
                 warn!("Hot-plug: failed to arm the system_server restart guard");
