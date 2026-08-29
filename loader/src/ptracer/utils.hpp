@@ -78,7 +78,32 @@ void align_stack(struct user_regs_struct &regs, long preserve = 0);
 uintptr_t push_string(int pid, struct user_regs_struct &regs, const char *str);
 
 uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_addr,
-                      uintptr_t return_addr, std::vector<long> &args);
+                      uintptr_t return_addr, std::vector<long> &args,
+                      bool *call_succeeded = nullptr);
+
+// --- Raw remote syscall primitive (used by the remote custom loader) ---
+//
+// Unlike remote_call(), which invokes a resolved libc *function*, these drive
+// raw syscalls in the tracee via a syscall-instruction gadget. This deliberately
+// avoids calling through libc so it keeps working on devices where IBT/GCS
+// (Indirect Branch Tracking / Guarded Control Stack) enforcement rejects a
+// ptrace-driven indirect call into a libc export.
+
+// Scans the tracee's executable maps (vDSO first, then other exec regions) for a
+// syscall instruction usable as a gadget for remote_syscall(). Returns 0 if none.
+uintptr_t find_syscall_gadget(int pid, const std::vector<MapInfo> &remote_info);
+
+// Waits for the tracee to reach a ptrace syscall-stop. Returns false (rather than
+// exiting, as wait_for_trace() does) if the process died instead of stopping, so
+// a failed remote_syscall can unwind to a fallback path.
+bool wait_for_ptrace_syscall_stop(int pid, int *status);
+
+// Executes a single raw syscall in the tracee through `syscall_gadget`, stepping
+// it with two PTRACE_SYSCALL stops (entry + exit). The tracee's registers are
+// saved before and restored after, so `regs` is left as it was on entry. Returns
+// the syscall's return value, or -1 on a ptrace failure.
+long remote_syscall(int pid, struct user_regs_struct &regs, uintptr_t syscall_gadget, long sysnr,
+                    long *args, size_t args_count);
 
 int fork_dont_care();
 

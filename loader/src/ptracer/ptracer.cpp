@@ -18,6 +18,7 @@
 
 #include "daemon.hpp"
 #include "logging.hpp"
+#include "remote_csoloader.hpp"
 #include "utils.hpp"
 
 /**
@@ -216,16 +217,23 @@ bool inject_on_main(int pid, const char *lib_path) {
         return false;
     };
 
-    // Remotely call dlopen(lib_path, RTLD_NOW).
-    //
-    // This deliberately loads by PATH rather than from a memfd via
-    // android_dlopen_ext(ANDROID_DLEXT_USE_LIBRARY_FD). An fd-based load was
-    // tried and reverted: handing the target an fd requires it to open
-    // /proc/<tracer>/fd/<n>, which the kernel gates behind ptrace_may_access()
-    // plus SELinux and which simply fails on some devices; and any fd left
-    // open in zygote is fatal, because zygote validates every open descriptor
-    // against an allowlist on each fork and aborts the process outright on an
-    // unrecognized one ("Not allowlisted ... /memfd:libzygisk.so").
+    if (libc_return_addr == nullptr) {
+        return abort_injection("could not find a safe libc return trap in the target process");
+    }
+
+    // Where the injected library lands and the address of its `entry` symbol;
+    // both load paths below fill these in.
+    void *start_addr = nullptr;
+    size_t block_size = 0;
+    uintptr_t injector_entry = 0;
+    bool custom_loaded = false;
+
+    // --- Primary load: remote dlopen() through the system linker ---
+    // Let bionic perform relocations and C++ constructor ordering whenever it
+    // accepts the path.  Besides being simpler, this is important for zygote
+    // safety: a failed hand-written constructor sequence may already have
+    // mutated global state before it faults, so it must never be attempted
+    // speculatively on devices where the normal linker works.
     LOGV("executing remote call to dlopen(\"%s\")", lib_path);
     auto dlopen_addr = find_func_addr(local_map, map, "libdl.so", "dlopen");
     if (dlopen_addr == nullptr) {
@@ -238,95 +246,123 @@ bool inject_on_main(int pid, const char *lib_path) {
     }
     args.push_back((long) remote_lib_path);
     args.push_back((long) RTLD_NOW);
-    auto remote_handle =
-        remote_call(pid, regs, (uintptr_t) dlopen_addr, (uintptr_t) libc_return_addr, args);
+    bool dlopen_call_succeeded = false;
+    auto remote_handle = remote_call(pid, regs, (uintptr_t) dlopen_addr,
+                                     (uintptr_t) libc_return_addr, args,
+                                     &dlopen_call_succeeded);
 
-    if (remote_handle == 0) {
-        LOGE("remote call to dlopen failed, retrieving error message with dlerror");
+    // A signal or unexpected ptrace stop while running the system linker is not
+    // a namespace rejection.  The tracee may be partially modified, so abort
+    // instead of trying another loader in the same zygote.
+    if (!dlopen_call_succeeded) {
+        return abort_injection("remote dlopen did not return cleanly");
+    }
 
-        // Probe whether the target can even see the file. dlopen() reports a
-        // bare "library ... not found" both when the path is invisible to the
-        // target (mount namespace / SELinux) and when the linker's namespace
-        // rules reject an otherwise-readable path -- this distinguishes them.
+    if (remote_handle != 0) {
+        LOGI("successfully loaded library via remote dlopen, handle: 0x%" PRIxPTR,
+             remote_handle);
+
+        LOGV("executing remote call to dlsym to find the 'entry' symbol");
+        auto dlsym_addr = find_func_addr(local_map, map, "libdl.so", "dlsym");
+        if (dlsym_addr == nullptr) {
+            return abort_injection("could not find address of dlsym in the target process");
+        }
+        args.clear();
+        auto remote_entry_str = push_string(pid, regs, "entry");
+        args.push_back(remote_handle);
+        args.push_back((long) remote_entry_str);
+        bool dlsym_call_succeeded = false;
+        injector_entry = remote_call(pid, regs, (uintptr_t) dlsym_addr,
+                                     (uintptr_t) libc_return_addr, args,
+                                     &dlsym_call_succeeded);
+        if (!dlsym_call_succeeded || injector_entry == 0) {
+            return abort_injection(
+                "dlsym failed to find the 'entry' symbol in the injected library");
+        }
+        LOGI("found injector entry point at address 0x%" PRIxPTR, injector_entry);
+
+        map = MapInfo::Scan(std::to_string(pid));
+        for (const auto &info : map) {
+            if (info.path.find("libzygisk.so") != std::string::npos) {
+                if (start_addr == nullptr) start_addr = (void *) info.start;
+                block_size += (info.end - info.start);
+            }
+        }
+        LOGV("found injected library mapped from %p with total size %zu", start_addr,
+             block_size);
+    } else {
+        // dlopen returned normally but rejected the path.  This is the narrow
+        // case the custom loader exists for (notably some KernelSU LKM linker
+        // namespaces), so collect diagnostics and then use it as a fallback.
+        LOGW("remote dlopen rejected the library; trying the custom loader fallback");
         if (auto access_addr = find_func_addr(local_map, map, "libc.so", "access");
             access_addr != nullptr) {
             args.clear();
             args.push_back((long) remote_lib_path);
             args.push_back(R_OK);
-            auto access_ret =
-                remote_call(pid, regs, (uintptr_t) access_addr, (uintptr_t) libc_return_addr, args);
-            LOGE("target-side access(\"%s\", R_OK) returned %ld (0 = readable by target)", lib_path,
-                 (long) access_ret);
+            bool access_call_succeeded = false;
+            auto access_ret = remote_call(pid, regs, (uintptr_t) access_addr,
+                                          (uintptr_t) libc_return_addr, args,
+                                          &access_call_succeeded);
+            if (access_call_succeeded) {
+                LOGW("target-side access(\"%s\", R_OK) returned %ld (0 = readable)",
+                     lib_path, (long) access_ret);
+            }
         }
 
-        auto dlerror_addr = find_func_addr(local_map, map, "libdl.so", "dlerror");
-        if (dlerror_addr == nullptr) {
-            return abort_injection("could not find address of dlerror; cannot retrieve error string");
+        if (auto dlerror_addr = find_func_addr(local_map, map, "libdl.so", "dlerror");
+            dlerror_addr != nullptr) {
+            args.clear();
+            bool dlerror_call_succeeded = false;
+            auto dlerror_str_addr = remote_call(pid, regs, (uintptr_t) dlerror_addr,
+                                                (uintptr_t) libc_return_addr, args,
+                                                &dlerror_call_succeeded);
+            if (dlerror_call_succeeded && dlerror_str_addr != 0) {
+                if (auto strlen_addr = find_func_addr(local_map, map, "libc.so", "strlen");
+                    strlen_addr != nullptr) {
+                    args.clear();
+                    args.push_back(dlerror_str_addr);
+                    bool strlen_call_succeeded = false;
+                    auto dlerror_len = remote_call(pid, regs, (uintptr_t) strlen_addr,
+                                                   (uintptr_t) libc_return_addr, args,
+                                                   &strlen_call_succeeded);
+                    if (strlen_call_succeeded && dlerror_len > 0 && dlerror_len < 4096) {
+                        std::string err((size_t) dlerror_len + 1, 0);
+                        read_proc(pid, (uintptr_t) dlerror_str_addr, err.data(), dlerror_len);
+                        LOGW("dlopen error: %s", err.c_str());
+                    }
+                }
+            }
         }
-        args.clear();
-        auto dlerror_str_addr =
-            remote_call(pid, regs, (uintptr_t) dlerror_addr, (uintptr_t) libc_return_addr, args);
-        if (dlerror_str_addr == 0) {
-            return abort_injection("remote call to dlerror returned null");
-        }
-        auto strlen_addr = find_func_addr(local_map, map, "libc.so", "strlen");
-        if (strlen_addr == nullptr) {
-            return abort_injection("could not find address of strlen; cannot measure error string length");
-        }
-        args.clear();
-        args.push_back(dlerror_str_addr);
-        auto dlerror_len =
-            remote_call(pid, regs, (uintptr_t) strlen_addr, (uintptr_t) libc_return_addr, args);
-        if (dlerror_len <= 0) {
-            return abort_injection("dlerror string length is invalid");
-        }
-        std::string err;
-        err.resize(dlerror_len + 1, 0);
-        read_proc(pid, (uintptr_t) dlerror_str_addr, err.data(), dlerror_len);
-        LOGE("dlopen error: %s", err.c_str());
-        set_regs(pid, backup);
-        return false;
-    }
-    LOGI("successfully loaded library via remote dlopen, handle: 0x%" PRIxPTR, remote_handle);
 
-    // Remotely call dlsym(handle, "entry")
-    LOGV("executing remote call to dlsym to find the 'entry' symbol");
-    auto dlsym_addr = find_func_addr(local_map, map, "libdl.so", "dlsym");
-    if (dlsym_addr == nullptr) {
-        return abort_injection("could not find address of dlsym in the target process");
-    }
-    args.clear();
-    auto remote_entry_str = push_string(pid, regs, "entry");
-    args.push_back(remote_handle);
-    args.push_back((long) remote_entry_str);
-    auto injector_entry =
-        remote_call(pid, regs, (uintptr_t) dlsym_addr, (uintptr_t) libc_return_addr, args);
-
-    if (injector_entry == 0) {
-        return abort_injection("dlsym failed to find the 'entry' symbol in the injected library");
-    }
-    LOGI("found injector entry point at address 0x%" PRIxPTR, injector_entry);
-
-    // Find the address range of the injected library to pass to its entry function.
-    map = MapInfo::Scan(std::to_string(pid));
-    void *start_addr = nullptr;
-    size_t block_size = 0;
-    for (const auto &info : map) {
-        if (info.path.find("libzygisk.so") != std::string::npos) {
-            if (start_addr == nullptr) start_addr = (void *) info.start;
-            block_size += (info.end - info.start);
+        uintptr_t rc_base = 0, rc_entry = 0;
+        size_t rc_size = 0;
+        if (!remote_csoloader_load_and_resolve_entry(pid, regs, map, local_map, lib_path,
+                                                      &rc_base, &rc_size, &rc_entry)) {
+            return abort_injection("both remote dlopen and the custom loader failed");
         }
+        start_addr = (void *) rc_base;
+        block_size = rc_size;
+        injector_entry = rc_entry;
+        custom_loaded = true;
+        LOGI("mapped libzygisk via the custom loader fallback at %p (entry 0x%" PRIxPTR ")",
+             start_addr, injector_entry);
     }
-    LOGV("found injected library mapped from %p with total size %zu", start_addr, block_size);
 
     // Remotely call our entry(start_addr, block_size, path) function
     LOGI("calling the injector's entry function to initialize OnyxZygisk");
-    args.clear();
-    args.push_back((uintptr_t) start_addr);
-    args.push_back(block_size);
+    std::vector<long> entry_args;
+    entry_args.push_back((uintptr_t) start_addr);
+    entry_args.push_back(block_size);
     auto remote_tmp_path = push_string(pid, regs, zygiskd::GetTmpPath().c_str());
-    args.push_back((long) remote_tmp_path);
-    remote_call(pid, regs, injector_entry, (uintptr_t) libc_return_addr, args);
+    entry_args.push_back((long) remote_tmp_path);
+    entry_args.push_back(custom_loaded);
+    bool entry_succeeded = false;
+    remote_call(pid, regs, injector_entry, (uintptr_t) libc_return_addr, entry_args,
+                &entry_succeeded);
+    if (!entry_succeeded) {
+        return abort_injection("libzygisk entry function failed before initialization completed");
+    }
 
     // --- Step 5: Restore State ---
     // `backup.REG_IP` was already set back to the original entry address above.

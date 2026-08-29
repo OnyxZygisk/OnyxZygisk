@@ -24,6 +24,18 @@ const char *const kWorkDirectory = WORK_DIRECTORY;
 void init_monitor() {
     LOGI("OnyxZygisk %s", ZKSU_VERSION);
 
+    // Boot-loop fail-safe: zygisk-init.sh latches this flag after several
+    // consecutive boots that never proved healthy (service.sh's health
+    // witness never got to clear the counter). Running with no injection at
+    // all is better than keeping the device in a reboot cycle; the user
+    // re-enables by removing the flag file.
+    std::string failsafe_flag = zygiskd::GetTmpPath() + "/injection_disabled";
+    if (access(failsafe_flag.c_str(), F_OK) == 0) {
+        LOGE("Boot-loop fail-safe latched (%s): injection disabled. Fix the offending module, then remove the flag to re-enable.",
+             failsafe_flag.c_str());
+        return;
+    }
+
     // All logic is now encapsulated in an AppMonitor instance.
     AppMonitor monitor;
     if (!monitor.prepare_environment()) {

@@ -25,6 +25,7 @@
     "running": "実行中",
     "stopped": "停止中",
     "working": "稼働中",
+    "installed": "インストール済み · ランタイム未起動",
     "unknown": "不明",
     "error": "エラー",
     "none": "なし",
@@ -37,7 +38,7 @@
     "pendingUpdate": "更新が保留中です",
     "hotplug": "今すぐ適用",
     "hotplugOff": "無効",
-    "hotplugNote": "有効化しました。新しく起動するアプリに適用されます",
+    "hotplugNote": "適用しました。デバイスを再起動して有効化します",
     "hotplugToggle": "ホットプラグ済み（取り外し可）"
   },
   "fn": {

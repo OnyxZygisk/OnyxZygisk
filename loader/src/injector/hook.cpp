@@ -99,8 +99,27 @@ DCL_HOOK_FUNC(static char *, strdup, const char *str) {
     return old_strdup(str);
 }
 
-// Skip actual fork and return cached result if applicable
 DCL_HOOK_FUNC(int, fork) { return (g_ctx && g_ctx->pid >= 0) ? g_ctx->pid : old_fork(); }
+
+// Hide the TracerPid line from any libc-based read() of
+// /proc/<pid>/status, and strip Zygisk-related pathnames from any
+// libc-based read() of /proc/<pid>/maps.  After the injector's
+// PTRACE_SEIZE/Detach cycle the kernel may still report a non-zero
+// TracerPid on some GKI 2.0 kernels (see detach_with_gki_workaround in
+// ptracer.cpp), and module loading leaves `jit-cache-zygisk` / `memfd:`
+// / `zygisk-module` backing-file names in /proc/<pid>/maps.  Detection
+// apps read both files to flag Zygote as being traced / injected.  We
+// rewrite the offending fields in-place so the caller never sees them.
+DCL_HOOK_FUNC(ssize_t, read, int fd, void *buf, size_t count) {
+    ssize_t ret = old_read(fd, buf, count);
+    if (ret > 0) {
+        char *b = static_cast<char *>(buf);
+        size_t n = static_cast<size_t>(ret);
+        sanitize_tracer_pid_in_buffer(b, n);
+        sanitize_maps_in_buffer(b, n);
+    }
+    return ret;
+}
 
 // Set up the app's private mount namespace according to the selected mount
 // mode (see module.hpp / zygiskd's ProcessFlags):
@@ -270,12 +289,17 @@ void HookContext::register_hook(dev_t dev, ino_t inode, const char *symbol, void
 void HookContext::hook_plt() {
     ino_t android_runtime_inode = 0;
     dev_t android_runtime_dev = 0;
+    ino_t libc_inode = 0;
+    dev_t libc_dev = 0;
 
     cached_map_infos = lsplt::MapInfo::Scan();
     for (auto &map : cached_map_infos) {
         if (map.path.ends_with("/libandroid_runtime.so")) {
             android_runtime_inode = map.inode;
             android_runtime_dev = map.dev;
+        } else if (map.path.ends_with("/libc.so") && libc_inode == 0) {
+            libc_inode = map.inode;
+            libc_dev = map.dev;
         }
     }
 
@@ -283,6 +307,10 @@ void HookContext::hook_plt() {
     PLT_HOOK_REGISTER(android_runtime_dev, android_runtime_inode, unshare);
     PLT_HOOK_REGISTER(android_runtime_dev, android_runtime_inode, strdup);
     PLT_HOOK_REGISTER(android_runtime_dev, android_runtime_inode, property_get);
+    // Hook read() in libc.so so any library that reads /proc/<pid>/status
+    // (including detection apps using libc directly) gets a sanitized
+    // TracerPid line.  See sanitize_tracer_pid_in_buffer.
+    PLT_HOOK_REGISTER(libc_dev, libc_inode, read);
 
     if (!lsplt::CommitHook(cached_map_infos)) LOGE("HookContext::hook_plt failed");
 
@@ -440,10 +468,15 @@ void HookContext::restore_zygote_hook(JNIEnv *env) {
 
 // -----------------------------------------------------------------
 
-void hook_entry(void *start_addr, size_t block_size) {
+void hook_entry(void *start_addr, size_t block_size, bool custom_loaded) {
     g_hook = new HookContext(start_addr, block_size);
     g_hook->hook_plt();
-    clean_linker_trace(zygiskd::GetTmpPath().data(), 1, 0, true);
+    // A custom-mapped image never entered bionic's solist. Trying to remove it
+    // would corrupt the linker's load counters and can dereference a record
+    // that does not exist. Path-based dlopen still needs the original cleanup.
+    if (!custom_loaded) {
+        clean_linker_trace(zygiskd::GetTmpPath().data(), 1, 0, true);
+    }
 }
 
 void hookJniNativeMethods(JNIEnv *env, const char *clz, JNINativeMethod *methods, int numMethods) {

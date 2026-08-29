@@ -296,10 +296,14 @@ uintptr_t push_string(int pid, struct user_regs_struct &regs, const char *str) {
  * 6.  Waiting for the process to trap (usually via SIGSEGV at our fake return address).
  * 7.  Reading the function's return value from the appropriate register.
  *
+ * @param call_succeeded Optional unambiguous success flag. This is required for
+ *        void functions, whose valid return value is indistinguishable from the
+ *        historical `0 on failure` return convention.
  * @return The return value of the remote function, or 0 on failure.
  */
 uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_addr,
-                      uintptr_t return_addr, std::vector<long> &args) {
+                      uintptr_t return_addr, std::vector<long> &args, bool *call_succeeded) {
+    if (call_succeeded) *call_succeeded = false;
     align_stack(regs);
     LOGV("calling remote function 0x%" PRIxPTR " with %zu args, return to 0x%" PRIxPTR, func_addr,
          args.size(), return_addr);
@@ -416,6 +420,7 @@ uintptr_t remote_call(int pid, struct user_regs_struct &regs, uintptr_t func_add
     // We expect the tracee to stop at our fake return address.
     if (WIFSTOPPED(status) && static_cast<uintptr_t>(regs.REG_IP) == return_addr) {
         LOGV("remote call returned, result: 0x%" PRIXPTR, (uintptr_t) regs.REG_RET);
+        if (call_succeeded) *call_succeeded = true;
         return regs.REG_RET;
     } else {
         LOGE("process stopped unexpectedly after remote call: %s at ip=0x%" PRIXPTR
@@ -600,4 +605,179 @@ std::string get_program(int pid) {
     }
     buf[sz] = 0;
     return buf;
+}
+
+// --- Raw remote syscall primitive ---------------------------------------------
+
+uintptr_t find_syscall_gadget(int pid, const std::vector<MapInfo> &remote_info) {
+    // The encodings below are the fixed-width syscall-entry instructions per ABI.
+#if defined(__aarch64__)
+    const uint32_t svc_insn = 0xD4000001;  // svc #0
+    const size_t insn_size = sizeof(svc_insn);
+#elif defined(__arm__)
+    const uint16_t thumb_svc_insn = 0xDF00;    // svc 0 (Thumb)
+    const uint32_t arm_svc_insn = 0xEF000000;  // svc 0 (ARM)
+#elif defined(__x86_64__)
+    const uint16_t svc_insn = 0x050F;  // syscall
+    const size_t insn_size = sizeof(svc_insn);
+#elif defined(__i386__)
+    const uint16_t svc_insn = 0x80CD;  // int 0x80
+    const size_t insn_size = sizeof(svc_insn);
+#endif
+
+    // Pass 0 searches the vDSO (always present, tiny, and a natural home for a
+    // syscall instruction); pass 1 falls back to any other executable region.
+    for (int pass = 0; pass < 2; pass++) {
+        bool vdso_only = (pass == 0);
+        for (const auto &m : remote_info) {
+            bool is_vdso = m.path.find("[vdso]") != std::string::npos;
+            if ((m.perms & PROT_EXEC) == 0 || is_vdso != vdso_only) continue;
+
+            size_t region_size = m.end - m.start;
+            size_t cap = vdso_only ? 0x10000 : 0x100000;  // bound the copy/scan
+            if (region_size > cap) region_size = cap;
+
+            std::vector<uint8_t> buf(region_size);
+            if (read_proc(pid, m.start, buf.data(), region_size) != (ssize_t) region_size) {
+                continue;
+            }
+
+#if defined(__arm__)
+            // A 32-bit binary may be ARM or Thumb; scan for both encodings. The
+            // returned Thumb address has its low bit set so callers land in Thumb.
+            for (size_t j = 0; j + sizeof(arm_svc_insn) <= region_size; j += sizeof(uint32_t)) {
+                if (memcmp(buf.data() + j, &arm_svc_insn, sizeof(arm_svc_insn)) == 0) {
+                    LOGV("found ARM syscall gadget at 0x%" PRIxPTR, m.start + j);
+                    return m.start + j;
+                }
+            }
+            for (size_t j = 0; j + sizeof(thumb_svc_insn) <= region_size; j += sizeof(uint16_t)) {
+                if (memcmp(buf.data() + j, &thumb_svc_insn, sizeof(thumb_svc_insn)) == 0) {
+                    LOGV("found Thumb syscall gadget at 0x%" PRIxPTR, m.start + j);
+                    return m.start + j + 1;
+                }
+            }
+#else
+            for (size_t j = 0; j + insn_size <= region_size; j += insn_size) {
+                if (memcmp(buf.data() + j, &svc_insn, insn_size) == 0) {
+                    LOGV("found syscall gadget at 0x%" PRIxPTR, m.start + j);
+                    return m.start + j;
+                }
+            }
+#endif
+        }
+    }
+
+    LOGE("failed to find a syscall gadget in the remote process");
+    return 0;
+}
+
+bool wait_for_ptrace_syscall_stop(int pid, int *status) {
+    while (true) {
+        if (waitpid(pid, status, __WALL) == -1) {
+            if (errno == EINTR) continue;
+            PLOGE("waitpid(%d) awaiting syscall-stop", pid);
+            return false;
+        }
+        if (WIFEXITED(*status) || WIFSIGNALED(*status)) {
+            LOGE("process %d died awaiting syscall-stop: %s", pid, parse_status(*status).c_str());
+            return false;
+        }
+        if (WIFSTOPPED(*status)) return true;
+        // Not a stop we care about (shouldn't normally happen under __WALL); loop.
+    }
+}
+
+long remote_syscall(int pid, struct user_regs_struct &regs, uintptr_t syscall_gadget, long sysnr,
+                    long *args, size_t args_count) {
+    LOGV("remote syscall %ld with %zu args via gadget 0x%" PRIxPTR, sysnr, args_count,
+         syscall_gadget);
+
+    struct user_regs_struct saved{};
+    if (!get_regs(pid, saved)) {
+        LOGE("remote_syscall: failed to save registers");
+        return -1;
+    }
+
+    // Restores the tracee to its pre-syscall state; every exit path runs it.
+    auto restore = [&]() {
+        regs = saved;
+        if (!set_regs(pid, regs)) LOGE("remote_syscall: failed to restore registers");
+    };
+
+#if defined(__aarch64__)
+    regs.regs[8] = sysnr;  // x8 = syscall number
+    for (size_t i = 0; i < 6; i++) regs.regs[i] = 0;
+    for (size_t i = 0; i < args_count && i < 6; i++) regs.regs[i] = args[i];
+    regs.REG_IP = syscall_gadget;
+    // Clear PSTATE.BTYPE so stepping into the vDSO svc is not rejected as an
+    // illegal branch target on BTI-enabled hardware.
+    regs.pstate &= ~(3ULL << 10);
+#elif defined(__arm__)
+    regs.uregs[7] = sysnr;  // r7 = syscall number
+    for (size_t i = 0; i < 6; i++) regs.uregs[i] = 0;
+    for (size_t i = 0; i < args_count && i < 6; i++) regs.uregs[i] = args[i];
+    constexpr unsigned long CPSR_T_MASK = 1lu << 5;
+    if (syscall_gadget & 1) {
+        regs.REG_IP = syscall_gadget & ~1u;
+        regs.uregs[16] |= CPSR_T_MASK;  // enter Thumb
+    } else {
+        regs.REG_IP = syscall_gadget;
+        regs.uregs[16] &= ~CPSR_T_MASK;  // enter ARM
+    }
+#elif defined(__x86_64__)
+    regs.REG_SYSNR = sysnr;
+    regs.rax = sysnr;
+    regs.rdi = regs.rsi = regs.rdx = regs.r10 = regs.r8 = regs.r9 = 0;
+    if (args_count >= 1) regs.rdi = args[0];
+    if (args_count >= 2) regs.rsi = args[1];
+    if (args_count >= 3) regs.rdx = args[2];
+    if (args_count >= 4) regs.r10 = args[3];
+    if (args_count >= 5) regs.r8 = args[4];
+    if (args_count >= 6) regs.r9 = args[5];
+    regs.REG_IP = syscall_gadget;
+#elif defined(__i386__)
+    regs.REG_SYSNR = sysnr;
+    regs.eax = sysnr;
+    regs.ebx = regs.ecx = regs.edx = regs.esi = regs.edi = regs.ebp = 0;
+    if (args_count >= 1) regs.ebx = args[0];
+    if (args_count >= 2) regs.ecx = args[1];
+    if (args_count >= 3) regs.edx = args[2];
+    if (args_count >= 4) regs.esi = args[3];
+    if (args_count >= 5) regs.edi = args[4];
+    if (args_count >= 6) regs.ebp = args[5];
+    regs.REG_IP = syscall_gadget;
+#endif
+
+    if (!set_regs(pid, regs)) {
+        LOGE("remote_syscall: failed to set registers");
+        restore();
+        return -1;
+    }
+
+    // Step through the syscall: the first PTRACE_SYSCALL stops at syscall-entry,
+    // the second at syscall-exit, at which point REG_RET holds the result.
+    for (int i = 0; i < 2; i++) {
+        if (ptrace(PTRACE_SYSCALL, pid, 0, 0) == -1) {
+            PLOGE("remote_syscall: PTRACE_SYSCALL");
+            restore();
+            return -1;
+        }
+        int status;
+        if (!wait_for_ptrace_syscall_stop(pid, &status)) {
+            restore();
+            return -1;
+        }
+    }
+
+    if (!get_regs(pid, regs)) {
+        LOGE("remote_syscall: failed to read result registers");
+        restore();
+        return -1;
+    }
+
+    long ret = (long) regs.REG_RET;
+    LOGV("remote syscall %ld returned %ld", sysnr, ret);
+    restore();
+    return ret;
 }

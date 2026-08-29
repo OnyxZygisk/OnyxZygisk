@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "OnyxZygisk WebUI — Vue 3 + Vite + TypeScript, built into the module's webroot/",
+  "description": "OnyxZygisk WebUI - Vue 3 + Vite + TypeScript, built into the module's webroot/",
   "packageManager": "pnpm@11.17.0",
   "scripts": {
     "dev": "vite",

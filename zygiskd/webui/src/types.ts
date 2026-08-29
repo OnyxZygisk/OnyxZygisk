@@ -12,11 +12,16 @@ export type BridgeHost = "ksu" | "mmrl" | null;
 
 /** The `key=value` header block of the status script output. */
 export interface StatusKeys {
+  status_protocol?: string;
+  installed?: string;
+  runtime?: string;
   version?: string;
   root?: string;
   z64?: string;
   z32?: string;
   daemon?: string;
+  hotplug?: string;
+  mount_mode?: string;
   workdir?: string;
   [key: string]: string | undefined;
 }

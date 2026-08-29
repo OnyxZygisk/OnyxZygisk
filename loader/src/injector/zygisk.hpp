@@ -18,7 +18,7 @@ struct mount_info {
     std::string raw_info;
 };
 
-void hook_entry(void *start_addr, size_t block_size);
+void hook_entry(void *start_addr, size_t block_size, bool custom_loaded);
 
 void hookJniNativeMethods(JNIEnv *env, const char *clz, JNINativeMethod *methods, int numMethods);
 
@@ -30,6 +30,20 @@ void clean_linker_trace(const char *path, size_t loaded_modules, size_t unloaded
 void spoof_virtual_maps(const char *path, bool clear_write_permission);
 
 void spoof_zygote_fossil(char *search_from, char *search_to, const char *anchor);
+
+/// Rewrite the `TracerPid:` line in a buffer read from /proc/<pid>/status
+/// so detection software cannot observe a non-zero tracer PID after the
+/// injector has detached.  Returns the number of bytes the caller should
+/// report as read (the rewrite is in-place and never grows the buffer).
+size_t sanitize_tracer_pid_in_buffer(char *buf, size_t nbytes);
+
+/// Strip the pathname from any `/proc/<pid>/maps` line whose backing file
+/// looks like a Zygisk artefact (`jit-cache-zygisk`, `memfd:...`,
+/// `zygisk-module`, ...).  The line is kept (so the row count and address
+/// layout stay identical) but its trailing pathname is blanked, so the
+/// mapping looks anonymous to detection software.  Returns the (possibly
+/// shortened) byte count the caller should report as read.
+size_t sanitize_maps_in_buffer(char *buf, size_t nbytes);
 
 void send_seccomp_event_if_needed();
 

@@ -5,6 +5,7 @@ build
 local.properties
 Cargo.lock
 target
+.zig-cache
 
 # WebUI (Vue 3 + Vite)
 zygiskd/webui/node_modules/

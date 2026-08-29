@@ -162,4 +162,36 @@ describe("ModulesSection", () => {
     expect(setModuleHotplug).toHaveBeenCalledWith("playintegrityfix", true);
     wrapper.unmount();
   });
+
+  it("allows a stale disabled hotplug module to be explicitly re-enabled", async () => {
+    vi.mocked(fetchState).mockResolvedValue(
+      state({
+        modules: [
+          {
+            id: "zygisk_vector",
+            name: "Vector",
+            version: "1.0",
+            author: "Vector",
+            zygisk: true,
+            disabled: true,
+            desc: "",
+            pendingUpdate: false,
+            hotplugEnabled: true,
+            hotplugged: true,
+          },
+        ],
+      }),
+    );
+    const wrapper = mount(ModulesSection);
+    await flushPromises();
+
+    const toggle = wrapper.find(".mod-row__hotplug input[type=checkbox]");
+    expect((toggle.element as HTMLInputElement).checked).toBe(false);
+    expect((toggle.element as HTMLInputElement).disabled).toBe(false);
+
+    await toggle.setValue(true);
+    await flushPromises();
+    expect(setModuleHotplug).toHaveBeenCalledWith("zygisk_vector", true);
+    wrapper.unmount();
+  });
 });

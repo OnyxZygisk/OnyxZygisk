@@ -22,10 +22,10 @@ async function toggleHotplug(m: ModuleInfo, enabled: boolean) {
   msg.value = "";
   try {
     await setModuleHotplug(m.id, enabled);
-    // No zygote restart: killing zygote makes the whole framework restart
-    // (a soft reboot) on some OEMs. The daemon serves the staged module to
-    // every process forked after this point, and the manager itself picks it
-    // up when reopened.
+    // The daemon CLI safely moves a staged module into the active directory,
+    // finishes its lifecycle scripts, and reboots the device once so the
+    // module loads at the fresh system_server fork. The manager/WebView
+    // closes as part of that intentional reboot.
     msg.value = t("modules.hotplugNote");
     await load();
   } catch (e) {
@@ -61,10 +61,11 @@ async function toggleHotplug(m: ModuleInfo, enabled: boolean) {
             >
               <span class="mod-row__hotplug-label">
                 {{ m.pendingUpdate ? t("modules.hotplug") : t("modules.hotplugToggle") }}
-                <span v-if="!hotplug" class="mod-row__hotplug-off">{{ t("modules.hotplugOff") }}</span>
+                <span v-if="m.disabled" class="mod-row__hotplug-off">{{ t("common.disabled") }}</span>
+                <span v-else-if="!hotplug" class="mod-row__hotplug-off">{{ t("modules.hotplugOff") }}</span>
               </span>
               <Switch
-                :checked="m.hotplugEnabled"
+                :checked="m.hotplugEnabled && !m.disabled"
                 :disabled="!hotplug"
                 @update:checked="toggleHotplug(m, $event)"
               />

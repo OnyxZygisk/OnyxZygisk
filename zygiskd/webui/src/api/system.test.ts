@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { fmtVer, parseMonitor, parseStatus } from "./system";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../bridge", () => ({ exec: vi.fn() }));
+
+import { exec } from "../bridge";
+import { fetchLogs, fetchState, fmtVer, parseMonitor, parseStatus } from "./system";
+
+beforeEach(() => {
+  vi.mocked(exec).mockReset();
+});
 
 describe("parseStatus", () => {
   const sample = [
@@ -72,6 +80,58 @@ describe("parseStatus", () => {
     expect(d.monitor).toBe("");
     expect(d.modules).toEqual([]);
     expect(d.fns).toEqual([]);
+  });
+});
+
+describe("fetchState", () => {
+  it("accepts a complete status protocol even if the bridge reports a non-zero errno", async () => {
+    vi.mocked(exec).mockResolvedValue({
+      errno: 1,
+      stdout: "status_protocol=1\ninstalled=1\n@@monitor\n\tmonitor:\ttracing\n@@modules\n@@fn",
+      stderr: "",
+    });
+
+    const data = await fetchState();
+    expect(data.keys.installed).toBe("1");
+    expect(data.monitor).toContain("monitor:");
+  });
+
+  it("rejects output without the protocol marker", async () => {
+    vi.mocked(exec).mockResolvedValue({ errno: 1, stdout: "shell failed", stderr: "" });
+    await expect(fetchState()).rejects.toThrow("shell failed");
+  });
+});
+
+describe("fetchLogs", () => {
+  it("uses logcat stdout even when the bridge reports a non-zero errno", async () => {
+    vi.mocked(exec).mockResolvedValue({
+      errno: 1,
+      stdout: "I/zygiskd: Hot-plug: swapped staged module\n",
+      stderr: "",
+    });
+
+    await expect(fetchLogs(200)).resolves.toBe("I/zygiskd: Hot-plug: swapped staged module");
+    expect(vi.mocked(exec).mock.calls[0][0]).toContain("-s zygiskd:* zygisk-sh:*");
+    expect(vi.mocked(exec).mock.calls[0][0]).not.toContain("zygisk-core");
+  });
+
+  it("falls back to KernelSU log snapshots when logcat is unavailable", async () => {
+    vi.mocked(exec)
+      .mockResolvedValueOnce({ errno: 1, stdout: "", stderr: "logcat denied" })
+      .mockResolvedValueOnce({ errno: 0, stdout: "I/zygiskd: Module script stdout\n", stderr: "" });
+
+    await expect(fetchLogs(200)).resolves.toBe("I/zygiskd: Module script stdout");
+    expect(vi.mocked(exec).mock.calls[1][0]).toContain("/data/adb/ksu/log/logcat.log");
+    expect(vi.mocked(exec).mock.calls[1][0]).toContain('tail -n "$read"');
+    expect(vi.mocked(exec).mock.calls[1][0]).toContain('grep -E "zygiskd|zygisk-sh"');
+  });
+
+  it("returns an empty log instead of an error when no log source is readable", async () => {
+    vi.mocked(exec)
+      .mockResolvedValueOnce({ errno: 1, stdout: "", stderr: "logcat denied" })
+      .mockResolvedValueOnce({ errno: 0, stdout: "", stderr: "" });
+
+    await expect(fetchLogs(200)).resolves.toBe("");
   });
 });
 

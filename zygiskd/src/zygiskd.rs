@@ -10,8 +10,8 @@
 //!   and managing companion processes.
 
 use crate::constants::{DaemonSocketAction, ProcessFlags, ZKSU_VERSION};
-use crate::mount::{MountNamespace, MountNamespaceManager};
 use crate::r#fn;
+use crate::mount::{MountNamespace, MountNamespaceManager};
 use crate::utils::{self, UnixStreamExt};
 use crate::{constants, lp_select, root_impl};
 use anyhow::{Context as AnyhowContext, Result, bail};
@@ -19,19 +19,20 @@ use log::{debug, error, info, trace, warn};
 use passfd::FdPassingExt;
 use rustix::io::{FdFlags, fcntl_setfd};
 use std::fs;
-use std::io::Error;
+use std::io::{Error, ErrorKind};
 use std::os::fd::AsRawFd;
 use std::os::fd::{AsFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::{
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
+    time::Duration,
 };
 
 /// A classic Zygisk module, as scanned fresh from `PATH_MODULES_DIR`.
@@ -73,6 +74,9 @@ pub fn main(tmp_path: Option<&str>) -> Result<()> {
     info!("Welcome to OnyxZygisk ({}) !", ZKSU_VERSION);
 
     initialize_globals(tmp_path)?;
+    // Cross-boot circuit breaker: resolve a hot-plug restart guard left over
+    // from a crashed session BEFORE any module library is served.
+    resolve_stale_restart_guard();
     // One-time snapshot for the startup log only; every actual request re-scans
     // fresh (see `load_modules`), so this does not need to stay in sync with
     // modules installed/removed later. activate=false: must not run/rename a
@@ -144,6 +148,7 @@ fn handle_connection(mut stream: UnixStream, context: Arc<AppContext>) -> Result
         DaemonSocketAction::SystemServerStarted => {
             let value = constants::SYSTEM_SERVER_STARTED;
             utils::unix_datagram_sendto(CONTROLLER_SOCKET.get().unwrap(), &value.to_le_bytes())?;
+            handle_hotplug_restart_guard();
             // FN `boot` (service.sh) scripts run at late-start, after
             // system_server is up — the same point Magisk runs service.sh.
             r#fn::run_fn_scripts(TMP_PATH.get().unwrap(), "boot");
@@ -250,6 +255,13 @@ fn send_startup_info(modules: &[Module]) -> Result<()> {
         .context("Failed to send startup info to controller")
 }
 
+fn refresh_controller_info() {
+    match load_modules(false).and_then(|modules| send_startup_info(&modules)) {
+        Ok(()) => info!("Hot-plug: refreshed runtime module status"),
+        Err(e) => warn!("Hot-plug: failed to refresh runtime module status: {}", e),
+    }
+}
+
 /// Detects the device architecture.
 fn get_arch() -> Result<&'static str> {
     let system_arch = utils::get_property("ro.product.cpu.abi")?;
@@ -282,7 +294,9 @@ fn staged_update_ready(name: &str) -> bool {
     let dir = Path::new(constants::PATH_MODULES_UPDATE_DIR).join(name);
     dir.join("module.prop").exists()
         && (dir.join("zygisk/arm64-v8a.so").exists()
-            || dir.join("zygisk/armeabi-v7a.so").exists())
+            || dir.join("zygisk/armeabi-v7a.so").exists()
+            || dir.join("zygisk/x86_64.so").exists()
+            || dir.join("zygisk/x86.so").exists())
 }
 
 /// Whether the user explicitly opted `name` into using its staged update
@@ -295,7 +309,10 @@ fn staged_update_ready(name: &str) -> bool {
 /// root solution's own official boot-time commit. Requiring this opt-in too
 /// turns that automatic behavior into an explicit, per-module confirmation.
 fn hotplug_opted_in(name: &str) -> bool {
-    Path::new(TMP_PATH.get().unwrap()).join("hotplug").join(name).exists()
+    Path::new(TMP_PATH.get().unwrap())
+        .join("hotplug")
+        .join(name)
+        .exists()
 }
 
 /// Master switch for the whole hot-plug feature (`WORKDIR/hotplug_off`
@@ -303,7 +320,148 @@ fn hotplug_opted_in(name: &str) -> bool {
 /// only take effect through the root solution's own boot-time swap — i.e. a
 /// reboot. Absent by default, so hot-plug is on out of the box.
 fn hotplug_master_enabled() -> bool {
-    !Path::new(TMP_PATH.get().unwrap()).join("hotplug_off").exists()
+    !Path::new(TMP_PATH.get().unwrap())
+        .join("hotplug_off")
+        .exists()
+}
+
+fn valid_module_id(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
+
+/// Cross-process lock: both ABI daemons and the WebUI CLI can activate a
+/// module concurrently, so a process-local Mutex cannot protect the swap.
+struct HotplugFileLock(fs::File);
+
+impl Drop for HotplugFileLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn acquire_hotplug_lock() -> Result<HotplugFileLock> {
+    let work = Path::new(TMP_PATH.get().unwrap());
+    fs::create_dir_all(work)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(work.join("hotplug.lock"))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(Error::last_os_error()).context("failed to lock hot-plug transaction");
+    }
+    Ok(HotplugFileLock(file))
+}
+
+fn activation_markers() -> PathBuf {
+    Path::new(TMP_PATH.get().unwrap()).join("hotplug_activated")
+}
+
+fn activation_marker(name: &str, suffix: &str) -> PathBuf {
+    activation_markers().join(format!("{name}.{suffix}"))
+}
+
+fn write_activation_marker(name: &str, suffix: &str) {
+    let marker = activation_marker(name, suffix);
+    if let Some(parent) = marker.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(marker, b"1");
+}
+
+fn clear_activation_markers(name: &str) {
+    for suffix in ["post_fs_data", "service", "restarted", "applying", "state"] {
+        let _ = fs::remove_file(activation_marker(name, suffix));
+    }
+}
+
+/// Move a complete staged module into the real active directory with rollback.
+fn swap_staged_module(name: &str, module_dir: &Path) -> Result<PathBuf> {
+    if !valid_module_id(name) {
+        bail!("invalid hot-plug module id: {name}");
+    }
+    let expected = Path::new(constants::PATH_MODULES_UPDATE_DIR).join(name);
+    if module_dir != expected || !staged_update_ready(name) {
+        bail!("staged module {name} is missing or incomplete");
+    }
+
+    let _lock = acquire_hotplug_lock()?;
+    if !staged_update_ready(name) {
+        bail!("staged module {name} was already activated");
+    }
+    if !fs::symlink_metadata(module_dir)?.file_type().is_dir() {
+        bail!(
+            "staged module path is not a real directory: {}",
+            module_dir.display()
+        );
+    }
+
+    let active_dir = Path::new(constants::PATH_MODULES_DIR).join(name);
+    let backup_dir =
+        Path::new(constants::PATH_MODULES_UPDATE_DIR).join(format!(".onyx-hotplug-backup-{name}"));
+    if backup_dir.exists() {
+        fs::remove_dir_all(&backup_dir).with_context(|| {
+            format!(
+                "failed to remove stale hot-plug backup {}",
+                backup_dir.display()
+            )
+        })?;
+    }
+
+    let had_active = active_dir.exists();
+    if had_active {
+        if !fs::symlink_metadata(&active_dir)?.file_type().is_dir() {
+            bail!(
+                "active module path is not a real directory: {}",
+                active_dir.display()
+            );
+        }
+        if active_dir.join("disable").exists() && !module_dir.join("disable").exists() {
+            fs::write(module_dir.join("disable"), b"")?;
+        }
+        fs::rename(&active_dir, &backup_dir).with_context(|| {
+            format!("failed to preserve active module {}", active_dir.display())
+        })?;
+    }
+
+    if let Err(swap_error) = fs::rename(module_dir, &active_dir) {
+        if had_active {
+            if let Err(restore_error) = fs::rename(&backup_dir, &active_dir) {
+                error!(
+                    "Hot-plug rollback failed for \"{}\": swap={}, restore={}",
+                    name, swap_error, restore_error
+                );
+            }
+        }
+        return Err(swap_error).with_context(|| {
+            format!("failed to move staged module into {}", active_dir.display())
+        });
+    }
+
+    if had_active {
+        if let Err(e) = fs::remove_dir_all(&backup_dir) {
+            warn!(
+                "Hot-plug: could not remove backup {}: {}",
+                backup_dir.display(),
+                e
+            );
+        }
+    }
+
+    clear_activation_markers(name);
+    write_activation_marker(name, "applying");
+    info!(
+        "Hot-plug: swapped staged module \"{}\" into the active directory",
+        name
+    );
+    Ok(active_dir)
 }
 
 /// Names and directories of every module eligible for Zygisk injection,
@@ -341,12 +499,26 @@ fn eligible_modules(arch: &str) -> Vec<(String, PathBuf)> {
             let name = entry.file_name().into_string().unwrap_or_default();
             let module_dir = entry.path();
             if module_dir.join(format!("zygisk/{arch}.so")).exists() {
-                let disabled = module_dir.join("disable").exists();
+                // Once a module was moved into the active directory by our
+                // hot-plug transaction, its per-module switch remains
+                // authoritative.  Turning the switch off must actually stop
+                // serving the library to newly forked processes; merely
+                // removing the preference file while continuing to enumerate
+                // every active module made "unplug" ineffective.
+                let was_hotplugged = activation_marker(&name, "post_fs_data").exists();
+                if was_hotplugged && !hotplug_opted_in(&name) {
+                    continue;
+                }
+                let disabled =
+                    module_dir.join("disable").exists() || module_dir.join("remove").exists();
                 modules.insert(name, (module_dir, disabled));
             }
         }
     } else {
-        warn!("Failed to read modules directory: {}", constants::PATH_MODULES_DIR);
+        warn!(
+            "Failed to read modules directory: {}",
+            constants::PATH_MODULES_DIR
+        );
     }
 
     // Unplug: a module that was hot-plugged into the active directory stays
@@ -505,6 +677,129 @@ fn run_module_script(module_dir: &Path, script: &Path) {
     }
 }
 
+fn parse_daemon_nice_name(script: &str) -> Option<String> {
+    let marker = "--nice-name=";
+    let start = script.find(marker)? + marker.len();
+    let rest = &script[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '\\')
+        .unwrap_or(rest.len());
+    let name = rest[..end].trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn process_cmdline_matches<F>(mut pred: F) -> bool
+where
+    F: FnMut(&[String]) -> bool,
+{
+    let Ok(dir) = fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in dir.flatten() {
+        if entry.file_name().to_string_lossy().parse::<i32>().is_err() {
+            continue;
+        }
+        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if cmdline.is_empty() {
+            continue;
+        }
+        let args: Vec<String> = cmdline
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect();
+        if pred(&args) {
+            return true;
+        }
+    }
+    false
+}
+
+fn module_daemon_running(module_dir: &Path, nice_name: Option<&str>) -> bool {
+    let daemon_path = module_dir.join("daemon").to_string_lossy().into_owned();
+    process_cmdline_matches(|args| {
+        if let Some(first) = args.first() {
+            if nice_name.is_some_and(|name| first == name) {
+                return true;
+            }
+        }
+        args.iter().any(|arg| arg == &daemon_path)
+    })
+}
+
+/// Some modules start a long-lived daemon from service.sh and swallow its
+/// stderr (Vector's daemon redirects app_process to /dev/null). If service.sh
+/// was invoked from a live hot-plug transaction but the daemon process never
+/// appears, retry the module's daemon directly from the real active directory
+/// and keep its early stderr in WORKDIR/hotplug_activated/<id>.daemon.log.
+fn ensure_module_daemon_started(name: &str, module_dir: &Path) {
+    let daemon = module_dir.join("daemon");
+    if !daemon.is_file() {
+        return;
+    }
+
+    let script = fs::read_to_string(&daemon).unwrap_or_default();
+    let nice_name = parse_daemon_nice_name(&script);
+    thread::sleep(Duration::from_secs(1));
+    if module_daemon_running(module_dir, nice_name.as_deref()) {
+        info!(
+            "Hot-plug: daemon for \"{}\" is running{}",
+            name,
+            nice_name
+                .as_deref()
+                .map(|n| format!(" ({n})"))
+                .unwrap_or_default()
+        );
+        return;
+    }
+
+    warn!(
+        "Hot-plug: daemon for \"{}\" did not appear after service.sh; retrying direct start",
+        name
+    );
+    let log_path = activation_marker(name, "daemon.log");
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+    let stdout = log_file
+        .as_ref()
+        .and_then(|file| file.try_clone().ok())
+        .map(Stdio::from)
+        .unwrap_or_else(Stdio::null);
+    let stderr = log_file
+        .map(Stdio::from)
+        .unwrap_or_else(Stdio::null);
+
+    let mut command = Command::new("sh");
+    command.arg(&daemon);
+    if script.contains("system-server-max-retry") || nice_name.as_deref() == Some("vectord") {
+        command.arg("--system-server-max-retry=3");
+    }
+
+    match command
+        .current_dir(module_dir)
+        .env("MODDIR", module_dir)
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+    {
+        Ok(child) => info!(
+            "Hot-plug: spawned fallback daemon for \"{}\" as pid {}",
+            name,
+            child.id()
+        ),
+        Err(e) => warn!(
+            "Hot-plug: failed to spawn fallback daemon for \"{}\": {}",
+            name, e
+        ),
+    }
+}
+
 /// Whether system_server is up enough for `service.sh`-stage daemons (lspd
 /// etc.) to start safely — they crash on an unprepared framework.
 ///
@@ -556,66 +851,128 @@ fn system_server_ready() -> bool {
 /// active dir, and the root solution's next boot-time swap finds nothing
 /// left in modules_update/.
 fn activate_staged_module(name: &str, module_dir: &Path) {
-    let active_dir = Path::new(constants::PATH_MODULES_DIR).join(name);
-    // Swap the staged copy into the active directory (preserving a possible
-    // disable flag from the active stub, like the boot-time swap inherits
-    // the disabled state).
-    if let Ok(md) = fs::metadata(&active_dir) {
-        if md.is_dir() {
-            let _ = fs::rename(active_dir.join("disable"), module_dir.join("disable"));
-            let _ = fs::remove_dir_all(&active_dir);
+    let dir = match swap_staged_module(name, module_dir) {
+        Ok(dir) => dir,
+        Err(e) => {
+            warn!(
+                "Hot-plug: failed to activate staged module \"{}\": {:#}",
+                name, e
+            );
+            return;
         }
-    }
-    if let Err(e) = fs::rename(module_dir, &active_dir) {
-        warn!(
-            "Hot-plug: failed to swap staged module \"{}\" into {}: {}",
-            name, active_dir.display(), e
-        );
-        return;
-    }
-    info!("Hot-plug: swapped staged module \"{}\" into the active directory", name);
+    };
 
-    let dir = active_dir;
-    let marker_post = Path::new(TMP_PATH.get().unwrap())
-        .join("hotplug_activated")
-        .join(format!("{name}.post_fs_data"));
-    if !marker_post.exists() {
-        let dir_clone = dir.clone();
-        let marker_clone = marker_post.clone();
-        std::thread::spawn(move || {
-            let p = dir_clone.join("post-fs-data.sh");
-            if p.is_file() {
-                run_module_script(&dir_clone, &p);
+    let name = name.to_string();
+    info!(
+        "Hot-plug: scheduling lifecycle scripts for swapped module \"{}\"",
+        name
+    );
+    std::thread::spawn(move || {
+        let post = dir.join("post-fs-data.sh");
+        if post.is_file() {
+            run_module_script(&dir, &post);
+        }
+        write_activation_marker(&name, "post_fs_data");
+
+        if system_server_ready() {
+            let service = dir.join("service.sh");
+            if service.is_file() {
+                run_module_script(&dir, &service);
             }
-            if let Some(parent) = marker_clone.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::write(&marker_clone, b"1");
-        });
+            ensure_module_daemon_started(&name, &dir);
+            write_activation_marker(&name, "service");
+            let _ = fs::write(activation_marker(&name, "state"), b"1");
+            let _ = fs::remove_file(activation_marker(&name, "applying"));
+            refresh_controller_info();
+            reboot_device_to_activate(&name, false);
+        } else {
+            // run_pending_staged_services() finishes service + restart later.
+            let _ = fs::remove_file(activation_marker(&name, "applying"));
+        }
+    });
+}
+
+/// Apply the WebUI's current per-module hot-plug preference immediately.
+pub fn apply_hotplug(tmp_path: Option<&str>, name: &str) -> Result<()> {
+    initialize_globals(tmp_path)?;
+    if !valid_module_id(name) {
+        bail!("invalid hot-plug module id: {name}");
     }
-    let marker_svc = Path::new(TMP_PATH.get().unwrap())
-        .join("hotplug_activated")
-        .join(format!("{name}.service"));
-    if !marker_svc.exists() && system_server_ready() {
-        let dir_clone = dir.clone();
-        let marker_clone = marker_svc.clone();
-        let name_clone = name.to_string();
-        std::thread::spawn(move || {
-            let p = dir_clone.join("service.sh");
-            if p.is_file() {
-                run_module_script(&dir_clone, &p);
-            }
-            if let Some(parent) = marker_clone.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::write(&marker_clone, b"1");
-            // lspd (and any service.sh daemon) is now up. Re-fork
-            // system_server once so this freshly hot-plugged framework module
-            // loads at specialize and actually activates — no full reboot.
-            restart_system_server_once(&name_clone);
-        });
-        info!("Hot-plug: scheduling service.sh for swapped module \"{}\"", name);
+
+    let enabled = hotplug_opted_in(name);
+    if enabled && !hotplug_master_enabled() {
+        bail!("hot-plug master switch is disabled");
     }
+
+    let active_dir = Path::new(constants::PATH_MODULES_DIR).join(name);
+    if enabled && active_dir.join("remove").exists() {
+        bail!("module {name} is pending removal");
+    }
+
+    // The hot-plug preference and the root manager's `disable` marker are
+    // separate files.  KernelSU safe mode (or a previous manual disable) can
+    // therefore leave the switch visually on while every module scan skips
+    // the library.  An explicit ON request means "make this module active",
+    // so reconcile the real module state before swapping/serving it.  The UI
+    // presents a disabled+opted-in module as unchecked, making this action an
+    // intentional second click rather than silently overriding safe mode.
+    let reenabled = enabled && active_dir.join("disable").exists();
+    if reenabled {
+        fs::remove_file(active_dir.join("disable"))
+            .with_context(|| format!("failed to re-enable module {name}"))?;
+        let _ = fs::remove_file(activation_marker(name, "crash_blocked"));
+        info!(
+            "Hot-plug: removed stale disable marker for module \"{}\"",
+            name
+        );
+    }
+    let mut swapped = false;
+    if enabled && staged_update_ready(name) {
+        let staged_dir = Path::new(constants::PATH_MODULES_UPDATE_DIR).join(name);
+        swap_staged_module(name, &staged_dir)?;
+        swapped = true;
+    }
+
+    if enabled && !active_dir.is_dir() {
+        bail!("module {name} is not installed in the active directory");
+    }
+
+    if swapped {
+        let post = active_dir.join("post-fs-data.sh");
+        if post.is_file() {
+            run_module_script(&active_dir, &post);
+        }
+        write_activation_marker(name, "post_fs_data");
+
+        if !system_server_ready() {
+            let _ = fs::remove_file(activation_marker(name, "applying"));
+            bail!("system_server is not ready; service activation was deferred");
+        }
+        let service = active_dir.join("service.sh");
+        if service.is_file() {
+            run_module_script(&active_dir, &service);
+        }
+        ensure_module_daemon_started(name, &active_dir);
+        write_activation_marker(name, "service");
+        let _ = fs::remove_file(activation_marker(name, "applying"));
+    }
+
+    // The WebUI writes the preference before invoking this CLI.  Persist it
+    // for status/recovery, but do not use the old value to suppress an
+    // explicit request: the preference may have been changed by the restart
+    // guard or safe mode while this marker still says `1`.  That stale-state
+    // combination made turning the visible switch back on a no-op.  The
+    // per-system_server PID marker in reboot_device_to_activate provides the
+    // correct idempotency for duplicate bridge deliveries.
+    let state_marker = activation_marker(name, "state");
+    let target_state = if enabled { "1" } else { "0" };
+    fs::write(&state_marker, target_state.as_bytes())?;
+
+    refresh_controller_info();
+    if !reboot_device_to_activate(name, true) {
+        bail!("device could not be rebooted to apply the change");
+    }
+    Ok(())
 }
 
 /// Opted-in staged modules (master switch on, staged copy complete, per-module
@@ -665,36 +1022,313 @@ fn pidof_system_server() -> Option<i32> {
     None
 }
 
-/// Restart just system_server (a ~15s framework "soft reboot", not a device
-/// reboot) so a freshly hot-plugged framework module (LSPosed) is loaded at
-/// the fresh fork/specialize — the ONLY point a framework module activates.
-/// Killing system_server makes init respawn zygote's system_server; our
-/// nativeForkSystemServer hook then injects the now-active module the normal,
-/// crash-free way. Guarded by a one-shot marker so it happens once per
-/// hot-plug, never on an ordinary boot (where the module is already active and
-/// no swap runs).
-fn restart_system_server_once(name: &str) {
-    let marker = Path::new(TMP_PATH.get().unwrap())
-        .join("hotplug_activated")
-        .join(format!("{name}.restarted"));
-    if marker.exists() {
+fn hotplug_restart_guard() -> PathBuf {
+    Path::new(TMP_PATH.get().unwrap()).join("hotplug_restart_guard")
+}
+
+/// Stable identifier for the current kernel boot.  Unlike process IDs this
+/// cannot accidentally compare equal across two reboots, and both ABI daemon
+/// instances see the same value.
+fn current_boot_id() -> Option<String> {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && !value.contains(':'))
+}
+
+/// Startup half of the hot-plug circuit breaker.
+///
+/// `handle_hotplug_restart_guard` can only advance while the daemon is alive
+/// to see `SystemServerStarted` events, so every boot re-evaluates whatever
+/// guard the previous session left behind (post-fs-data deliberately no
+/// longer deletes it):
+///
+/// The guard contains the kernel boot UUID, so the 32-bit and 64-bit daemons
+/// can distinguish "another daemon started in this boot" from "the device
+/// booted again".  Without it, daemon #1 changed `rebooting` to `confirming`
+/// and daemon #2 immediately treated that as a second reboot and unplugged
+/// the module.
+///
+/// - `rebooting` — on the first *different* boot, keep the module active and
+///   advance to `confirming`; the first SystemServerStarted of this boot will
+///   move it to `observing`.
+///   Also clear the `restarted` marker here: it was written by the previous
+///   session to dedupe the reboot request, and the reboot has now happened,
+///   so leaving it would make a later apply_hotplug no-op even though the
+///   module is only just being activated this boot.
+/// - `confirming` — the device rebooted AGAIN before the framework ever
+///   confirmed itself: the module broke the boot path (e.g. a zygote crash
+///   escalated by init).  Unplug it before its library is served anywhere.
+/// - `observing` — a full reboot crossed the restart/stability window
+///   (crash evidence, e.g. `zygote reboot by service`).  Unplug.
+///
+/// Better one false positive (the user re-enables the switch) than an
+/// infinite boot loop.
+fn resolve_stale_restart_guard() {
+    let guard = hotplug_restart_guard();
+    let Ok(content) = fs::read_to_string(&guard) else {
+        return; // No guard: the previous session ended cleanly.
+    };
+    let Some(boot_id) = current_boot_id() else {
+        // Never disable a module merely because the kernel boot identity was
+        // unavailable.  The live PID-based guard still handles framework
+        // restarts inside this boot.
+        warn!("Hot-plug: kernel boot id is unavailable; skipping cross-boot guard resolution");
+        return;
+    };
+    let mut parts = content.trim().split(':');
+    let (stage, name) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let recorded_boot = parts.next().unwrap_or("").trim();
+    if !valid_module_id(name) {
+        let _ = fs::remove_file(&guard);
         return;
     }
-    if let Some(parent) = marker.parent() {
-        let _ = fs::create_dir_all(parent);
+
+    // v1.0.6 initially stored only a decimal system_server PID.  It cannot
+    // identify a boot reliably, so discard that legacy guard instead of
+    // falsely unplugging a healthy module after upgrading this fix.
+    if recorded_boot.parse::<i32>().is_ok() || recorded_boot.is_empty() {
+        warn!(
+            "Hot-plug: discarding legacy restart guard for module \"{}\"",
+            name
+        );
+        let _ = fs::remove_file(&guard);
+        let _ = fs::remove_file(activation_marker(name, "restarted"));
+        return;
     }
-    let _ = fs::write(&marker, b"1");
+    match stage {
+        "rebooting" => {
+            if recorded_boot == boot_id {
+                // The reboot command was issued in this boot and another ABI
+                // daemon reached startup before shutdown completed.
+                return;
+            }
+            info!(
+                "Hot-plug: booting to activate module \"{}\"; awaiting framework confirmation",
+                name
+            );
+            // The cold reboot requested by the previous session has now
+            // happened, so the `restarted` marker it wrote to dedupe that
+            // request is no longer meaningful.  Clear it so a later
+            // apply_hotplug on this boot (WebUI reconnect, root bridge
+            // reattach) can re-arm if needed instead of no-oping on the
+            // stale marker.
+            let _ = fs::remove_file(activation_marker(name, "restarted"));
+            let _ = fs::write(&guard, format!("confirming:{name}:{boot_id}").as_bytes());
+        }
+        "confirming" | "observing" if recorded_boot == boot_id => {
+            // A second ABI daemon (or a daemon restart) in the same kernel
+            // boot is not crash evidence.  Leave the live guard untouched.
+        }
+        "confirming" | "observing" => {
+            error!(
+                "Hot-plug: restart guard \"{}:{}\" survived a reboot; unplugging module \"{}\" as the likely crash cause",
+                stage, name, name
+            );
+            let _ = fs::remove_file(
+                Path::new(TMP_PATH.get().unwrap())
+                    .join("hotplug")
+                    .join(name),
+            );
+            let _ = fs::write(activation_marker(name, "state"), b"0");
+            let _ = fs::write(activation_marker(name, "crash_blocked"), b"1");
+            let _ = fs::remove_file(&guard);
+        }
+        _ => {
+            let _ = fs::remove_file(&guard);
+        }
+    }
+}
+
+/// Circuit breaker for a module that makes system_server crash immediately
+/// after hot-plugging.  The first SystemServerStarted after our intentional
+/// cold reboot (guard stage `rebooting`/`confirming`) begins a stability
+/// window.  A second, different PID inside that window means the framework
+/// restarted again without a user request: unplug the module so the device
+/// can recover on the next (user-initiated) reboot.
+///
+/// NOTE: the old soft-restart path used to SIGKILL system_server here to
+/// force a respawn from the now-unplugged module list.  With the cold-reboot
+/// activation model that is wrong — killing system_server IS a soft restart,
+/// which is exactly what we are trying to avoid.  The unplugged module is
+/// already gone from the active list, so the next ordinary app fork will be
+/// served without it; no kill is needed or safe.
+fn handle_hotplug_restart_guard() {
+    let guard = hotplug_restart_guard();
+    let Ok(contents) = fs::read_to_string(&guard) else {
+        return;
+    };
+    let mut parts = contents.trim().split(':');
+    let Some(stage) = parts.next() else { return };
+    let Some(name) = parts.next() else { return };
+    let Some(recorded_boot) = parts.next() else {
+        return;
+    };
+    let recorded_pid = parts.next().and_then(|p| p.parse::<i32>().ok());
+    let Some(boot_id) = current_boot_id() else {
+        return;
+    };
+    if !valid_module_id(name) {
+        let _ = fs::remove_file(&guard);
+        return;
+    }
+    let Some(current_pid) = pidof_system_server() else {
+        return;
+    };
+
+    if stage == "rebooting" {
+        // Still in the boot that requested the cold reboot.  Do not turn an
+        // unrelated SystemServerStarted event into a successful activation.
+        if recorded_boot == boot_id {
+            return;
+        }
+    } else if stage != "confirming" || recorded_boot != boot_id {
+        if stage != "observing" || recorded_boot != boot_id || recorded_pid == Some(current_pid) {
+            return;
+        }
+
+        warn!(
+            "Hot-plug: detected system_server restart loop after activating \"{}\"; automatically unplugging it",
+            name
+        );
+        let _ = fs::remove_file(
+            Path::new(TMP_PATH.get().unwrap())
+                .join("hotplug")
+                .join(name),
+        );
+        let _ = fs::write(activation_marker(name, "state"), b"0");
+        let _ = fs::write(activation_marker(name, "crash_blocked"), b"1");
+        let _ = fs::remove_file(&guard);
+        refresh_controller_info();
+        return;
+    }
+
+    // `confirming` belongs to this boot (or `rebooting` was recovered before
+    // startup resolution).  PID values commonly repeat across cold boots, so
+    // the boot UUID, not PID inequality, is what proves activation booted.
+    {
+        let observing = format!("observing:{name}:{boot_id}:{current_pid}");
+        if fs::write(&guard, observing.as_bytes()).is_err() {
+            return;
+        }
+        let guard_clone = guard.clone();
+        let name_clone = name.to_string();
+        let boot_clone = boot_id;
+        let pid_clone = current_pid;
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(30));
+            let expected = format!("observing:{name_clone}:{boot_clone}:{pid_clone}");
+            if fs::read_to_string(&guard_clone)
+                .map(|value| value.trim() == expected)
+                .unwrap_or(false)
+                && pidof_system_server() == Some(pid_clone)
+            {
+                // Activation succeeded and the framework stayed up.  Clear
+                // the restart marker too so a later apply_hotplug (WebUI
+                // reconnect, root bridge reattach) does not no-op on the
+                // stale `restarted` marker and can re-arm if the user
+                // toggles the module again.
+                let _ = fs::remove_file(&guard_clone);
+                let _ = fs::remove_file(activation_marker(&name_clone, "restarted"));
+                info!(
+                    "Hot-plug: system_server pid {} remained stable after activating \"{}\"; restart marker cleared",
+                    pid_clone, name_clone
+                );
+            }
+        });
+        return;
+    }
+}
+
+/// Activate a freshly hot-plugged framework module (LSPosed) by rebooting
+/// the device.  The module must be loaded at the fresh system_server
+/// fork/specialize — the ONLY point a framework module activates — and we
+/// used to get that cheaply by killing system_server (a ~15s framework
+/// "soft reboot").  That proved unsafe: a module that misbehaves on the
+/// soft-restarted framework makes zygote/netd restart repeatedly, and
+/// Android init escalates that into a hard reboot — looping the device.
+/// A full cold reboot re-runs the entire injection chain against a fresh
+/// zygote — the same, well-tested path a module takes after a normal
+/// install — and reliably lands the module in the new system_server.
+///
+/// Guarded by a one-shot marker so it happens once per hot-plug, never on
+/// an ordinary boot (where the module is already active and no swap runs).
+fn reboot_device_to_activate(name: &str, force: bool) -> bool {
+    // Serialize marker inspection and PID reservation across the 32/64-bit
+    // daemons plus WebUI CLI processes.  The old check-then-kill sequence was
+    // racy: several concurrent module scans could all observe a missing marker
+    // and kill system_server in succession.
+    let _lock = match acquire_hotplug_lock() {
+        Ok(lock) => lock,
+        Err(e) => {
+            warn!("Hot-plug: failed to lock system_server restart: {}", e);
+            return false;
+        }
+    };
+    let marker = activation_marker(name, "restarted");
+    if marker.exists() && !force {
+        return true;
+    }
     match pidof_system_server() {
         Some(pid) => {
-            info!(
-                "Hot-plug: restarting system_server (pid {}) to activate framework module \"{}\"",
-                pid, name
-            );
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
+            // Reserve this exact system_server generation before triggering
+            // the reboot.  A duplicate explicit request racing with us sees
+            // the same PID in the marker and becomes a no-op.  A later
+            // legitimate state transition sees a different PID and may
+            // reboot once.
+            if fs::read_to_string(&marker)
+                .ok()
+                .and_then(|value| value.trim().parse::<i32>().ok())
+                == Some(pid)
+            {
+                info!(
+                    "Hot-plug: system_server pid {} was already reserved for restart",
+                    pid
+                );
+                return true;
             }
+            if fs::write(&marker, pid.to_string().as_bytes()).is_err() {
+                warn!("Hot-plug: failed to reserve system_server restart marker");
+                return false;
+            }
+            // Mark the reboot as intentional: resolve_stale_restart_guard
+            // turns this into "confirming" at the next boot, so only a
+            // framework that then fails to stabilize gets the module
+            // unplugged.
+            let Some(boot_id) = current_boot_id() else {
+                let _ = fs::remove_file(&marker);
+                warn!("Hot-plug: kernel boot id is unavailable; refusing an unguarded reboot");
+                return false;
+            };
+            let guard = format!("rebooting:{name}:{boot_id}:{pid}");
+            if fs::write(hotplug_restart_guard(), guard.as_bytes()).is_err() {
+                let _ = fs::remove_file(&marker);
+                warn!("Hot-plug: failed to arm the system_server restart guard");
+                return false;
+            }
+            info!(
+                "Hot-plug: rebooting device to activate framework module \"{}\" (system_server pid {})",
+                name, pid
+            );
+            // Graceful reboot via init (stops services, syncs, unmounts).
+            // Fall back to the toybox reboot binary if the property cannot
+            // be set.
+            if let Err(e) = utils::set_property("sys.powerctl", "reboot") {
+                warn!(
+                    "Hot-plug: sys.powerctl reboot failed ({}); falling back to `reboot`",
+                    e
+                );
+                let _ = Command::new("reboot").status();
+            }
+            true
         }
-        None => warn!("Hot-plug: system_server pid not found; cannot restart to activate \"{}\"", name),
+        None => {
+            warn!(
+                "Hot-plug: system_server pid not found; cannot reboot to activate \"{}\"",
+                name
+            );
+            false
+        }
     }
 }
 
@@ -721,21 +1355,40 @@ fn run_pending_staged_services() {
         if !has_so {
             continue;
         }
+        // Atomically claim the deferred lifecycle job before spawning it.
+        // load_modules() is called concurrently by many forks, so checking a
+        // marker without creating it here schedules service.sh many times.
+        let applying = markers.join(format!("{name}.applying"));
+        match fs::OpenOptions::new().write(true).create_new(true).open(&applying) {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                warn!("Hot-plug: failed to claim deferred service for \"{}\": {}", name, e);
+                continue;
+            }
+        }
         let dir_clone = active_dir.clone();
         let marker_clone = markers.join(format!("{name}.service"));
+        let applying_clone = applying.clone();
         let name_clone = name.to_string();
         std::thread::spawn(move || {
             let p = dir_clone.join("service.sh");
             if p.is_file() {
                 run_module_script(&dir_clone, &p);
             }
+            ensure_module_daemon_started(&name_clone, &dir_clone);
             let _ = fs::write(&marker_clone, b"1");
-            // Re-fork system_server once so this freshly hot-plugged framework
-            // module activates at specialize — no full reboot. See
-            // restart_system_server_once.
-            restart_system_server_once(&name_clone);
+            let _ = fs::write(activation_marker(&name_clone, "state"), b"1");
+            let _ = fs::remove_file(&applying_clone);
+            // Reboot once so this freshly hot-plugged framework module
+            // activates at specialize. See reboot_device_to_activate.
+            refresh_controller_info();
+            reboot_device_to_activate(&name_clone, false);
         });
-        info!("Hot-plug: scheduling deferred service.sh for swapped module \"{}\"", name);
+        info!(
+            "Hot-plug: scheduling deferred service.sh for swapped module \"{}\"",
+            name
+        );
     }
 }
 
@@ -887,7 +1540,7 @@ fn handle_update_mount_namespace(stream: &mut UnixStream, context: &AppContext) 
         stream.write_u8(1)?;
         stream.send_fd(fd)?;
     } else {
-        // FAILURE: Send Status '0'. 
+        // FAILURE: Send Status '0'.
         // Do NOT send an FD or random u32 bytes, just stop here.
         warn!("Namespace {:?} is not cached yet.", namespace_type);
         stream.write_u8(0)?;
@@ -956,7 +1609,10 @@ fn handle_request_companion_socket(stream: &mut UnixStream, context: &AppContext
     // Send the companion FD to the client if available.
     if let Some(sock) = companion.as_ref() {
         if let Err(e) = sock.send_fd(stream.as_raw_fd()) {
-            error!("Failed to send companion socket FD for module `{}`: {}", name, e);
+            error!(
+                "Failed to send companion socket FD for module `{}`: {}",
+                name, e
+            );
             // Inform client of failure.
             stream.write_u8(0)?;
         }
@@ -990,7 +1646,10 @@ fn handle_request_fn_companion_socket(
     let mut companion = cell.lock().unwrap();
     if let Some(sock) = companion.as_ref() {
         if !utils::is_socket_alive(sock) {
-            error!("Companion for FN node `{}` appears to have crashed.", node.id);
+            error!(
+                "Companion for FN node `{}` appears to have crashed.",
+                node.id
+            );
             companion.take();
         }
     }
@@ -1001,7 +1660,10 @@ fn handle_request_fn_companion_socket(
                 *companion = Some(sock);
             }
             Ok(None) => {
-                warn!("FN node `{}` does not have a companion entry point.", node.id);
+                warn!(
+                    "FN node `{}` does not have a companion entry point.",
+                    node.id
+                );
             }
             Err(e) => {
                 warn!("Failed to spawn companion for FN node `{}`: {}", node.id, e);

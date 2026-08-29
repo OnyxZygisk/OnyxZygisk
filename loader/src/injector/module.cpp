@@ -454,15 +454,22 @@ void ZygiskContext::app_specialize_post() {
 // thread pulling modules and calling preServerSpecialize) and is a dead end:
 // device logs proved it deterministically SIGSEGVs system_server the instant
 // the load runs. A framework module (LSPosed) only activates when it is loaded
-// at system_server's *fork/specialize* — never mid-life. So a module
-// hot-plugged after boot is activated by re-forking system_server once (a
-// controlled ~15s framework restart, not a full reboot); the daemon does that
-// after swapping the module into the active directory. See
-// zygiskd::activate_staged_module.
+// at system_server's *fork/specialize* — never mid-life. Re-forking
+// system_server in place (kill + respawn) was tried next and proved unsafe:
+// a module that misbehaves on the soft-restarted framework makes zygote/netd
+// restart repeatedly, which Android init escalates into a hard reboot —
+// looping the device. So a module hot-plugged after boot is activated by
+// rebooting the device once; the daemon does that after swapping the module
+// into the active directory. See zygiskd::reboot_device_to_activate.
 
 void ZygiskContext::server_specialize_pre() {
-    run_modules_pre();
+    // Notify the daemon BEFORE loading any module. The daemon's hot-plug
+    // circuit breaker keys off this heartbeat: if a freshly hot-plugged
+    // module crashes or hangs system_server while being loaded below, the
+    // restart guard would otherwise stay armed forever and the breaker
+    // could never unplug the offending module.
     zygiskd::SystemServerStarted();
+    run_modules_pre();
 }
 
 void ZygiskContext::server_specialize_post() { run_modules_post(); }

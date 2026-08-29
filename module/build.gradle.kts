@@ -114,7 +114,7 @@ androidComponents.onVariants { variant ->
             expand(
                 "moduleId" to moduleId,
                 "moduleName" to moduleName,
-                // Keep the version line clean — build metadata stays in the
+                // Keep the version line clean; build metadata stays in the
                 // zip file name only (OnyxZygisk-v1.0.5-329-<hash>-release.zip).
                 "versionName" to verName,
                 "versionCode" to verCode
@@ -144,7 +144,7 @@ androidComponents.onVariants { variant ->
         // The WebUI ships as static files in the module's `webroot/` directory
         // (KernelSU webroot convention): root manager apps load the page
         // directly from there, no daemon involvement. The files come from the
-        // Vite build output (zygiskd/webui/dist) — see the `webuiBuild` task
+        // Vite build output (zygiskd/webui/dist); see the `webuiBuild` task
         // above. `customize.sh` extracts this directory on install
         // (SKIPUNZIP=1 mode).
         into("webroot") {

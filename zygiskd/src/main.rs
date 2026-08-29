@@ -76,8 +76,8 @@
 mod companion;
 mod constants;
 mod dl;
-mod mount;
 mod r#fn;
+mod mount;
 mod root_impl;
 mod supercall;
 mod utils;
@@ -116,6 +116,26 @@ fn start() {
         Some("root") => {
             root_impl::setup();
             println!("Detected root implementation: {:?}", root_impl::get());
+        }
+        Some("hotplug") => {
+            let Some(name) = args.get(2) else {
+                eprintln!("zygiskd: usage: hotplug <module-id> --workdir <path>");
+                std::process::exit(2);
+            };
+            let workdir = args
+                .iter()
+                .position(|arg| arg == "--workdir")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+            let result = mount::switch_mount_namespace(1).and_then(|_| {
+                root_impl::setup();
+                zygiskd::apply_hotplug(workdir, name)
+            });
+            if let Err(e) = result {
+                error!("Hot-plug apply failed: {:#}", e);
+                eprintln!("zygiskd: hot-plug failed: {e:#}");
+                std::process::exit(1);
+            }
         }
         _ => {
             // Default mode: the main daemon. It accepts an optional `--workdir <path>`

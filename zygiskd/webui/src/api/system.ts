@@ -1,12 +1,31 @@
 /* OnyxZygisk — data layer. One shell round-trip fetches full system state. */
 import { exec } from "../bridge";
-import type { FnNodeInfo, ModuleInfo, MonitorRow, StateData } from "../types";
+import type { ExecResult, FnNodeInfo, ModuleInfo, MonitorRow, StateData } from "../types";
 
 const WORKDIR = "/data/adb/onyxzygisk";
 const MODDIR = "/data/adb/modules/onyxzygisk";
+const STAGED_MODDIR = "/data/adb/modules_update/onyxzygisk";
+const MODULE_LOG_PATTERN = [
+  "Hot-plug",
+  "hot-plug",
+  "zygiskd: hot-plug",
+  "Module script",
+  "FN ",
+  "Installing FN",
+  "Updating FN",
+  "Removed FN",
+  "Enabled FN",
+  "Disabled FN",
+  "Scheduling FN",
+  "Scheduled [0-9]+ FN",
+  "runtime module status",
+  "mount mode",
+  "daemon failed",
+].join("|");
 
 const STATUS_SCRIPT = [
-  'MOD="' + MODDIR + '"; W="' + WORKDIR + '"',
+  'ACTIVE="' + MODDIR + '"; STAGED="' + STAGED_MODDIR + '"; W="' + WORKDIR + '"',
+  'MOD="$ACTIVE"; [ -f "$MOD/module.prop" ] || MOD="$STAGED"',
   'v=$(sed -n "s/^version=//p" "$MOD/module.prop" 2>/dev/null | head -n1)',
   "r=none",
   // Root provider detection: only a RUNNING daemon counts. Stale files from a
@@ -20,6 +39,9 @@ const STATUS_SCRIPT = [
   "pidof magiskd >/dev/null 2>&1 && r=Magisk",
   // Print an empty label instead of "none" when nothing was detected.
   '[ "$r" = none ] && r=',
+  'echo "status_protocol=1"',
+  'echo "installed=$([ -f "$MOD/module.prop" ] && echo 1 || echo 0)"',
+  'echo "runtime=$([ -s "$W/module.prop" ] && echo 1 || echo 0)"',
   'echo "version=$v"; echo "root=$r"',
   'pidof zygote64 >/dev/null 2>&1 && echo "z64=1" || echo "z64=0"',
   '(pidof zygote >/dev/null 2>&1 || pidof zygote_secondary >/dev/null 2>&1) && echo "z32=1" || echo "z32=0"',
@@ -58,13 +80,13 @@ const STATUS_SCRIPT = [
   // practice (ksud leaves only a metadata stub in modules/<id>, apd's global
   // flag is cleared at boot), so file completeness is the signal.
   '    pend=0',
-  '    [ -f "$ud/module.prop" ] && { [ -f "$ud/zygisk/arm64-v8a.so" ] || [ -f "$ud/zygisk/armeabi-v7a.so" ]; } && pend=1',
+  '    [ -f "$ud/module.prop" ] && { [ -f "$ud/zygisk/arm64-v8a.so" ] || [ -f "$ud/zygisk/armeabi-v7a.so" ] || [ -f "$ud/zygisk/x86_64.so" ] || [ -f "$ud/zygisk/x86.so" ]; } && pend=1',
   // Read metadata + the .so from the staged copy when a staged update is
   // present (it is the version that will run once applied), else the active
   // copy. `dis` always comes from the active dir — the disable flag lives
   // there and the daemon inherits it across the swap.
   '    msrc="$ad"; [ "$pend" = 1 ] && [ -f "$ud/module.prop" ] && msrc="$ud"',
-  '    zsrc="$ad"; [ "$pend" = 1 ] && { [ -f "$ud/zygisk/arm64-v8a.so" ] || [ -f "$ud/zygisk/armeabi-v7a.so" ]; } && zsrc="$ud"',
+  '    zsrc="$ad"; [ "$pend" = 1 ] && zsrc="$ud"',
   '    p="$msrc/module.prop"; [ -f "$p" ] || continue',
   '    zy=0; { [ -f "$zsrc/zygisk/arm64-v8a.so" ] || [ -f "$zsrc/zygisk/armeabi-v7a.so" ]; } && zy=1',
   // Only Zygisk-capable modules are shown in the WebUI.
@@ -73,7 +95,7 @@ const STATUS_SCRIPT = [
   '    ver=$(sed -n "s/^version=//p" "$p" | head -n1)',
   '    au=$(sed -n "s/^author=//p" "$p" | head -n1)',
   '    ds=$(sed -n "s/^description=//p" "$p" | head -n1)',
-  '    dis=0; [ -f "$ad/disable" ] && dis=1',
+  '    dis=0; { [ -f "$ad/disable" ] || [ -f "$ad/remove" ]; } && dis=1',
   '    hp=0; [ -f "$W/hotplug/$id" ] && hp=1',
   // Was this module hot-plugged into the active directory? Such modules keep
   // a plug/unplug switch (hotplug flag present = plugged), independent of
@@ -92,6 +114,10 @@ const STATUS_SCRIPT = [
   '  st=enabled; [ -f "$d/disable" ] && st=disabled; [ -f "$d/remove" ] && st=pending_remove',
   '  echo "F|$id|$nm|$ver|$tr|$sc|$st"',
   "done",
+  // A glob with no FN directory can leave some Android shells with the test
+  // command's non-zero status even though the full protocol was emitted.
+  // Make the read-only status script explicitly successful.
+  ":",
   // Lines are joined with newlines, NOT "; ": a `; ` separator turns the
   // multi-line `for ...; do` loops into `do;` which is a shell syntax error.
 ].join("\n");
@@ -148,7 +174,25 @@ export function parseStatus(out: string): StateData {
 
 export async function fetchState(): Promise<StateData> {
   const r = await exec(STATUS_SCRIPT);
-  return parseStatus(r.stdout);
+  const data = parseStatus(r.stdout);
+  // The protocol marker is authoritative. A few root-manager shells report a
+  // non-zero callback errno after an otherwise complete multi-line script
+  // (notably when its final glob is empty), so rejecting solely on errno turns
+  // valid state into an error containing the entire status payload.
+  if (data.keys.status_protocol !== "1") {
+    const detail = (r.stdout || r.stderr).trim();
+    throw new Error(detail || `status command returned incomplete data (exit ${r.errno})`);
+  }
+  return data;
+}
+
+async function execChecked(cmd: string, operation: string): Promise<ExecResult> {
+  const r = await exec(cmd);
+  if (r.errno !== 0) {
+    const detail = (r.stdout || r.stderr).trim();
+    throw new Error(detail || `${operation} failed (exit ${r.errno})`);
+  }
+  return r;
 }
 
 /** Parse the monitor status section of the workdir module.prop.
@@ -173,25 +217,71 @@ export function parseMonitor(text: string): MonitorRow[] {
 }
 
 export async function fetchLogs(lines: number | string): Promise<string> {
-  const n = parseInt(String(lines), 10) || 200;
+  const parsed = parseInt(String(lines), 10);
+  const n = Math.min(300, Math.max(20, Number.isFinite(parsed) ? parsed : 120));
+  const readLimit = Math.min(500, Math.max(n * 3, 120));
   const r = await exec(
-    `logcat -d -v brief -t ${n} -s zygiskd:* zygisk-core64:* zygisk-core32:* zygisk-sh:* 2>/dev/null`,
+    `logcat -d -v brief -t ${readLimit} -s zygiskd:* zygisk-sh:* 2>/dev/null | grep -E '${MODULE_LOG_PATTERN}' | tail -n ${n}`,
   );
-  return r.stdout.trim();
+  const logcatOut = r.stdout.trim();
+  if (logcatOut || r.errno === 0) return logcatOut;
+
+  // Some root-manager WebUI bridges report a non-zero errno for `logcat`, or
+  // run in a context where logcat is unavailable. KernelSU already captures a
+  // full logcat snapshot, so fall back to that file instead of turning the log
+  // panel into a red error box.
+  const fallback = [
+    `n=${n}`,
+    `read=${readLimit}`,
+    `pat='${MODULE_LOG_PATTERN}'`,
+    "for f in /data/adb/ksu/log/logcat.log /data/adb/ksu/log/logcat.old.log; do",
+    '  [ -r "$f" ] || continue',
+    '  tail -n "$read" "$f" 2>/dev/null | grep -E "zygiskd|zygisk-sh" | grep -E "$pat" | tail -n "$n"',
+    "  exit 0",
+    "done",
+    ":",
+  ].join("\n");
+  const fb = await exec(fallback);
+  const fallbackOut = fb.stdout.trim();
+  if (fallbackOut || fb.errno === 0) return fallbackOut;
+
+  const detail = (r.stderr || fb.stderr || r.stdout || fb.stdout).trim();
+  throw new Error(detail || `read logs failed (exit ${r.errno})`);
 }
 
 export async function setFnEnabled(id: string, enabled: boolean): Promise<void> {
   const flag = `${WORKDIR}/fn/${id}/disable`;
-  await exec(enabled ? `rm -f '${flag}'` : `touch '${flag}'`);
+  await execChecked(enabled ? `rm -f '${flag}'` : `touch '${flag}'`, "update FN module");
 }
 
 /** Opt a module with a detected pending update into using it immediately —
  * the daemon only overlays a staged update when both this flag and the
  * hot-plug master switch are on. See zygiskd::eligible_modules. */
 export async function setModuleHotplug(id: string, enabled: boolean): Promise<void> {
+  if (!/^[A-Za-z0-9._-]+$/.test(id) || id === "." || id === "..") {
+    throw new Error("invalid module id");
+  }
   const dir = `${WORKDIR}/hotplug`;
   const flag = `${dir}/${id}`;
-  await exec(enabled ? `mkdir -p '${dir}' && touch '${flag}'` : `rm -f '${flag}'`);
+  await execChecked(
+    enabled ? `mkdir -p '${dir}' && touch '${flag}'` : `rm -f '${flag}'`,
+    "update hot-plug preference",
+  );
+
+  // Apply immediately through the bundled daemon CLI. It performs the staged
+  // -> active transaction, runs module lifecycle scripts, then reboots the
+  // device once so the module loads at the fresh system_server fork. Both
+  // ABIs are tried, including a staged OnyxZygisk update whose binary may
+  // not have moved into the active directory yet.
+  const apply = [
+    'bin=""',
+    `for b in '${MODDIR}/bin/zygiskd64' '${MODDIR}/bin/zygiskd32' '${STAGED_MODDIR}/bin/zygiskd64' '${STAGED_MODDIR}/bin/zygiskd32'; do`,
+    '  [ -x "$b" ] && { bin="$b"; break; }',
+    "done",
+    '[ -n "$bin" ] || { echo "OnyxZygisk daemon binary not found"; exit 127; }',
+    `"$bin" hotplug '${id}' --workdir '${WORKDIR}'`,
+  ].join("\n");
+  await execChecked(apply, "apply hot-plug module");
 }
 
 /** Master switch for the hot-plug feature. When off, per-module opt-ins are
@@ -200,7 +290,7 @@ export async function setModuleHotplug(id: string, enabled: boolean): Promise<vo
  * See zygiskd::hotplug_master_enabled. */
 export async function setHotplugMaster(enabled: boolean): Promise<void> {
   const flag = `${WORKDIR}/hotplug_off`;
-  await exec(enabled ? `rm -f '${flag}'` : `touch '${flag}'`);
+  await execChecked(enabled ? `rm -f '${flag}'` : `touch '${flag}'`, "update hot-plug setting");
 }
 
 /** Mount mode for denylisted apps, applied by the daemon/loader on the next
@@ -213,7 +303,10 @@ export type MountMode = "revert" | "setns" | "global";
 export async function setMountMode(mode: MountMode): Promise<void> {
   const flag = `${WORKDIR}/mount_mode`;
   // "revert" is the default — clear the file rather than storing it.
-  await exec(mode === "revert" ? `rm -f '${flag}'` : `printf '%s' '${mode}' > '${flag}'`);
+  await execChecked(
+    mode === "revert" ? `rm -f '${flag}'` : `printf '%s' '${mode}' > '${flag}'`,
+    "update mount mode",
+  );
 }
 
 /** Normalize version display: strip a leading v/V then add one. */

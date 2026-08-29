@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/* Logs section — the zygiskd / zygisk-core / zygisk-sh logcat view.
+/* Logs section - module operation log view.
  *
  * Auto-refresh keeps the scroll position stable so the view does not "jump"
  * while reading. Rows are parsed from the brief logcat format and colorized
@@ -17,7 +17,7 @@ import Toolbar from "./atoms/Toolbar.vue";
 const { t, locale } = useLocale();
 
 const out = ref<HTMLPreElement | null>(null);
-const lines = ref(200);
+const lines = ref(120);
 const auto = ref(true);
 const filter = ref("");
 const raw = ref("");
@@ -148,7 +148,7 @@ watch(filter, () => render());
       <Toolbar>
         <label class="log-lines"
           >{{ t("logs.lines") }}
-          <input type="number" v-model.number="lines" min="50" max="2000" />
+          <input type="number" v-model.number="lines" min="20" max="300" />
         </label>
         <label class="log-auto"
           ><input type="checkbox" v-model="auto" /> {{ t("logs.auto") }}</label

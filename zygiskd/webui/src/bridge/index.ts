@@ -82,7 +82,17 @@ function b64ToUtf8(b64: string): string {
 /** Execute a shell command; stdout is guaranteed correct UTF-8. */
 export async function exec(cmd: string): Promise<ExecResult> {
   if (!detectBridge()) return { errno: 0, stdout: devResponse(cmd), stderr: "" };
-  const wrapped = "{ " + cmd + " ; } 2>/dev/null | base64";
+  // Preserve the wrapped command's exit status. Piping straight into `base64`
+  // makes the pipeline report base64's (usually zero) status, which previously
+  // turned every failed write/hot-plug command into a fake success.
+  const wrapped = [
+    'out="$({',
+    cmd,
+    '} 2>&1)"',
+    "rc=$?",
+    'printf "%s" "$out" | base64',
+    'exit "$rc"',
+  ].join("\n");
   const r = await bridgeRaw(wrapped);
   return { errno: r.errno, stdout: b64ToUtf8(r.stdout), stderr: r.stderr };
 }

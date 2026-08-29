@@ -25,6 +25,7 @@
     "running": "运行中",
     "stopped": "已停止",
     "working": "工作中",
+    "installed": "已安装 · 运行时未启动",
     "unknown": "未知",
     "error": "错误",
     "none": "无",
@@ -37,7 +38,7 @@
     "pendingUpdate": "有更新待生效",
     "hotplug": "立即生效",
     "hotplugOff": "已停用",
-    "hotplugNote": "已启用，新启动的应用将加载该模块",
+    "hotplugNote": "已应用，设备即将重启以完成激活",
     "hotplugToggle": "已热插拔（可拔）"
   },
   "fn": {

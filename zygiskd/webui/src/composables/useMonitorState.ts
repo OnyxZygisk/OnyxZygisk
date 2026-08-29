@@ -22,6 +22,9 @@ export interface MonitorState {
   fns: Ref<FnNodeInfo[]>;
   rootImpl: Ref<string>;
   version: Ref<string>;
+  installed: Ref<boolean>;
+  runtimeReady: Ref<boolean>;
+  daemonRunning: Ref<boolean>;
   hotplug: Ref<boolean>;
   mountMode: Ref<string>;
   load: () => Promise<void>;
@@ -35,6 +38,9 @@ export function useMonitorState(): MonitorState {
   const fns = ref<FnNodeInfo[]>([]);
   const rootImpl = ref("");
   const version = ref("");
+  const installed = ref(false);
+  const runtimeReady = ref(false);
+  const daemonRunning = ref(false);
   const hotplug = ref(true);
   const mountMode = ref("revert");
   const { locale } = useLocale();
@@ -46,6 +52,9 @@ export function useMonitorState(): MonitorState {
       const d = await fetchState();
       rootImpl.value = d.keys.root || "";
       version.value = d.keys.version || "";
+      installed.value = d.keys.installed === "1";
+      runtimeReady.value = d.keys.runtime === "1";
+      daemonRunning.value = d.keys.daemon === "1";
       hotplug.value = d.keys.hotplug !== "0";
       mountMode.value = d.keys.mount_mode || "revert";
       monitor.value = parseMonitor(d.monitor);
@@ -67,5 +76,19 @@ export function useMonitorState(): MonitorState {
   // Reload on language switch (dev mock data follows the locale).
   watch(locale, () => load());
 
-  return { loading, error, monitor, modules, fns, rootImpl, version, hotplug, mountMode, load };
+  return {
+    loading,
+    error,
+    monitor,
+    modules,
+    fns,
+    rootImpl,
+    version,
+    installed,
+    runtimeReady,
+    daemonRunning,
+    hotplug,
+    mountMode,
+    load,
+  };
 }

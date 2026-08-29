@@ -66,6 +66,21 @@ fi
 VERSION=$(grep_prop version "${TMPDIR}/module.prop")
 ui_print "- Installing OnyxZygisk $VERSION"
 
+# Installing/updating the module is an explicit request to retry injection.
+# Clear a previously latched boot-loop recovery state; otherwise the new
+# binary is installed successfully but its monitor exits before doing any
+# work, which looks exactly like a broken hot-plug switch.  Preserve the
+# user's hotplug/ and mount-mode preferences.
+ONYX_WORKDIR=/data/adb/onyxzygisk
+if [ -f "$ONYX_WORKDIR/injection_disabled" ]; then
+  ui_print "- Clearing stale boot-loop fail-safe latch"
+fi
+rm -f "$ONYX_WORKDIR/injection_disabled" \
+  "$ONYX_WORKDIR/boot_fail_count" \
+  "$ONYX_WORKDIR/boot_fail_boot_id" \
+  "$ONYX_WORKDIR/hotplug_restart_guard" \
+  "$ONYX_WORKDIR"/hotplug_activated/*.restarted
+
 # check android
 if [ "$API" -lt 26 ]; then
   ui_print "! Unsupported sdk: $API"

@@ -25,6 +25,7 @@
     "running": "Running",
     "stopped": "Stopped",
     "working": "Working",
+    "installed": "Installed · runtime inactive",
     "unknown": "Unknown",
     "error": "Error",
     "none": "None",
@@ -37,7 +38,7 @@
     "pendingUpdate": "Update staged, not yet applied",
     "hotplug": "Apply now",
     "hotplugOff": "master off",
-    "hotplugNote": "Enabled — newly started apps will load this module",
+    "hotplugNote": "Applied; the device will now reboot to finish activation",
     "hotplugToggle": "Hot-plugged (unplug)"
   },
   "fn": {

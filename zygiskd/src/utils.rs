@@ -112,6 +112,28 @@ pub fn get_property(name: &str) -> Result<String> {
     }
 }
 
+/// Sets an Android system property value.
+pub fn set_property(name: &str, value: &str) -> Result<()> {
+    #[cfg(target_os = "android")]
+    {
+        let name_c = CString::new(name)?;
+        let value_c = CString::new(value)?;
+        // Returns 0 on success, -1 on failure.
+        let ret = unsafe { __system_property_set(name_c.as_ptr(), value_c.as_ptr()) };
+        if ret == 0 {
+            Ok(())
+        } else {
+            anyhow::bail!("__system_property_set({name}) returned {ret}")
+        }
+    }
+    // Non-Android builds (host unit tests) have no property service.
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (name, value);
+        Ok(())
+    }
+}
+
 // --- Unix Socket and IPC Extensions ---
 
 /// An extension trait for `UnixStream` to simplify reading and writing common data types.
@@ -220,5 +242,5 @@ pub fn is_socket_alive(stream: &UnixStream) -> bool {
 // --- FFI for Android System APIs ---
 unsafe extern "C" {
     fn __system_property_get(name: *const c_char, value: *mut c_char) -> u32;
-    // Other __system_property functions could be declared here if needed.
+    fn __system_property_set(name: *const c_char, value: *const c_char) -> i32;
 }

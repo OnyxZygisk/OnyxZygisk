@@ -50,11 +50,16 @@ export function devResponse(cmd: string): string {
   }
   if (cmd.indexOf("@@fn") !== -1) {
     return [
+      "status_protocol=1",
+      "installed=1",
+      "runtime=1",
       "version=1.0",
       "root=KernelSU",
       "z64=1",
       "z32=1",
       "daemon=1",
+      "hotplug=1",
+      "mount_mode=revert",
       "workdir=/data/adb/onyxzygisk",
       "@@monitor",
       "\tmonitor: \t tracing",

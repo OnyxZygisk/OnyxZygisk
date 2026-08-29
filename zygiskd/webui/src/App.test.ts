@@ -55,6 +55,27 @@ describe("App hero", () => {
     wrapper.unmount();
   });
 
+  it("shows installed instead of unknown before the runtime status file exists", async () => {
+    vi.mocked(fetchState).mockResolvedValue(
+      state({
+        keys: {
+          root: "KernelSU",
+          version: "1.0",
+          installed: "1",
+          runtime: "0",
+          daemon: "0",
+        },
+        monitor: "",
+      }),
+    );
+
+    const wrapper = mount(App, { global: { stubs } });
+    await flushPromises();
+    expect(wrapper.find(".badge").text()).toContain("Installed");
+    expect(wrapper.find(".badge").text()).not.toContain("Unknown");
+    wrapper.unmount();
+  });
+
   it("collapses to the compact style once scrolled past the threshold", async () => {
     const wrapper = mount(App, { global: { stubs } });
     await flushPromises();

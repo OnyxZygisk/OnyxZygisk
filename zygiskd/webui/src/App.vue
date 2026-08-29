@@ -16,7 +16,7 @@ const { t, locale } = useLocale();
 
 const state = useMonitorState();
 provide(MONITOR_STATE_KEY, state);
-const { loading, error, monitor, rootImpl, version } = state;
+const { loading, error, monitor, rootImpl, version, installed, runtimeReady, daemonRunning } = state;
 
 function valClass(v: string): string {
   if (/not injected|stopped|exited|crashed|invalid/i.test(v)) return "err";
@@ -25,16 +25,49 @@ function valClass(v: string): string {
   return "";
 }
 
-/** Overall hero badge derived from the live monitor rows. */
+/** Overall hero badge derived from the live monitor rows.
+ *
+ * The `monitor` row is authoritative for whether the framework is running:
+ * `tracing` = up, `stopped`/`exited` = down. Sub-rows such as
+ * `zygote64: not injected` mean injection is merely *pending* — no app has
+ * forked since boot yet — NOT that the monitor stopped, so they must not, on
+ * their own, flip the hero to "stopped" (which previously happened the whole
+ * time between boot and the first fork, and whenever a second ABI had nothing
+ * to inject into). Only a stopped/exited monitor, or a crashed daemon, is a
+ * genuine "stopped".
+ */
 const overall = computed(() => {
   if (loading.value) return { key: "common.loading", cls: "badge--idle", spin: true };
   if (error.value) return { key: "status.error", cls: "badge--err", spin: false };
-  const vals = monitor.value.filter((r) => r.label).map((r) => r.value);
-  if (!vals.length) return { key: "status.unknown", cls: "badge--idle", spin: false };
-  if (vals.some((v) => valClass(v) === "err"))
+  const rows = monitor.value.filter((r) => r.label);
+  if (!rows.length) {
+    if (daemonRunning.value)
+      return { key: "status.working", cls: "badge--ok", spin: false };
+    if (installed.value)
+      return { key: "status.installed", cls: "badge--warn", spin: false };
+    return { key: "status.unknown", cls: "badge--idle", spin: false };
+  }
+
+  const monitorVal = rows.find((r) => r.label === "monitor")?.value ?? "";
+
+  // Genuinely-stopped states.
+  if (/stopped|exited/i.test(monitorVal))
     return { key: "status.stopped", cls: "badge--err", spin: false };
-  if (vals.some((v) => valClass(v) === "ok"))
+  if (rows.some((r) => /crashed/i.test(r.value)))
+    return { key: "status.stopped", cls: "badge--err", spin: false };
+
+  // Monitor is tracing → the framework is up and watching, so it reads as
+  // "working". A zygote that is not injected yet just means no app has forked
+  // since boot; that shows on its own detail row and must not water the hero
+  // down while the monitor is plainly running.
+  if (/tracing/i.test(monitorVal))
     return { key: "status.working", cls: "badge--ok", spin: false };
+
+  // No monitor row (older builds / partial status) but something reads healthy.
+  if (rows.some((r) => valClass(r.value) === "ok"))
+    return { key: "status.working", cls: "badge--ok", spin: false };
+  if (installed.value && !runtimeReady.value)
+    return { key: "status.installed", cls: "badge--warn", spin: false };
   return { key: "status.unknown", cls: "badge--warn", spin: false };
 });
 
