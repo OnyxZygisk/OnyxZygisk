@@ -4,6 +4,7 @@
 build
 local.properties
 Cargo.lock
+!zygiskd/Cargo.lock
 target
 .zig-cache
 

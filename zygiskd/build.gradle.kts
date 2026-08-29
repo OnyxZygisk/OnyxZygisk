@@ -55,7 +55,7 @@ listOf("Debug", "Release").forEach { variantCap ->
             // unlike the short flag which was renamed from `-p` to `-P` in 4.0.3.
             val cargoArgs = mutableListOf("cargo", "ndk", "--platform", androidMinSdkVersion.toString())
             abiToTriple.keys.forEach { abi -> cargoArgs += listOf("-t", abi) }
-            cargoArgs += listOf("build", "--target-dir", targetDir.absolutePath)
+            cargoArgs += listOf("build", "--locked", "--target-dir", targetDir.absolutePath)
             if (isRelease) cargoArgs += "--release"
 
             providers.exec {
