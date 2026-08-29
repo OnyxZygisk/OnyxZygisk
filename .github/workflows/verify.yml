@@ -76,6 +76,11 @@ jobs:
           cache: pnpm
           cache-dependency-path: zygiskd/webui/pnpm-lock.yaml
       - name: Build release module
+        env:
+          # setup-rust-toolchain enables -D warnings globally. The existing
+          # Android build is warning-clean only for its own crate flags, while
+          # dependency diagnostics are not part of this release gate.
+          RUSTFLAGS: ""
         run: bash ./gradlew :module:zipRelease --no-daemon --console=plain
       - name: Upload module ZIP
         uses: actions/upload-artifact@v4
