@@ -70,7 +70,7 @@ jobs:
           cache: pnpm
           cache-dependency-path: zygiskd/webui/pnpm-lock.yaml
       - name: Build release module
-        run: ./gradlew :module:zipRelease --no-daemon --console=plain
+        run: bash ./gradlew :module:zipRelease --no-daemon --console=plain
       - name: Upload module ZIP
         uses: actions/upload-artifact@v4
         with:
