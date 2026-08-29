@@ -3,6 +3,19 @@ project("loader")
 
 set(CMAKE_CXX_STANDARD 23)
 
+# Zig is an optional host-side validation target during the staged migration.
+# It is deliberately not linked into zygisk yet: Android's Zygisk ABI and the
+# third-party linker/hook libraries remain a separate compatibility boundary.
+option(ONYX_BUILD_ZIGCORE_TESTS "Expose the platform-independent Zig tests" OFF)
+if(ONYX_BUILD_ZIGCORE_TESTS)
+    find_program(ZIG_EXECUTABLE zig REQUIRED)
+    add_custom_target(zigcore-test
+        COMMAND ${ZIG_EXECUTABLE} build test
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../zigcore
+        COMMENT "Running Zig loader-core tests"
+        VERBATIM)
+endif()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_definitions(-DZKSU_VERSION=\"${ZKSU_VERSION}\")
@@ -18,6 +31,11 @@ target_include_directories(common PRIVATE include)
 target_link_libraries(common log)
 
 aux_source_directory(injector INJECTOR_SRC_LIST)
+# Explicitly list files that aux_source_directory may miss on incremental
+# reconfigures (CMake only rescans the dir at configure time, and Gradle's
+# Android plugin does not always reconfigure when a file is added).
+list(APPEND INJECTOR_SRC_LIST
+    ${CMAKE_CURRENT_SOURCE_DIR}/injector/ptrace_clear.cpp)
 add_library(zygisk SHARED ${INJECTOR_SRC_LIST})
 target_compile_options(zygisk PRIVATE -Wno-invalid-offsetof -Wno-unused-private-field)
 target_include_directories(zygisk PRIVATE include)

@@ -2,6 +2,7 @@
 
 #include "daemon.hpp"
 #include "logging.hpp"
+#include "ptrace_clear.hpp"
 #include "zygisk.hpp"
 
 using namespace std;
@@ -18,6 +19,15 @@ void entry(void* addr, size_t size, const char* path, bool custom_loaded) {
     }
 
     hook_entry(addr, size, custom_loaded);
+
+    // Kernel-level TracerPid cleanup: install a one-shot seccomp BPF filter
+    // that triggers PTRACE_EVENT_SECCOMP, which the kernel consumes silently
+    // (no tracer attached) and in doing so clears any lingering ptrace state
+    // the injector left behind.  On kernels >= 5.10 this is a no-op (the
+    // filter itself would be visible), and the PLT-hook read() sanitization
+    // remains the primary defense.  See ptrace_clear.cpp.
+    perform_ptrace_message_clear();
+
     send_seccomp_event_if_needed();
 }
 

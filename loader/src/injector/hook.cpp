@@ -102,15 +102,21 @@ DCL_HOOK_FUNC(static char *, strdup, const char *str) {
 DCL_HOOK_FUNC(int, fork) { return (g_ctx && g_ctx->pid >= 0) ? g_ctx->pid : old_fork(); }
 
 // Hide the TracerPid line from any libc-based read() of
-// /proc/<pid>/status.  After the injector's PTRACE_SEIZE/Detach cycle the
-// kernel may still report a non-zero TracerPid on some GKI 2.0 kernels
-// (see detach_with_gki_workaround in ptracer.cpp), and detection apps
-// read /proc/self/status to flag Zygote as being traced.  We rewrite the
-// value to 0 in-place so the caller never sees the real tracer PID.
+// /proc/<pid>/status, and strip Zygisk-related pathnames from any
+// libc-based read() of /proc/<pid>/maps.  After the injector's
+// PTRACE_SEIZE/Detach cycle the kernel may still report a non-zero
+// TracerPid on some GKI 2.0 kernels (see detach_with_gki_workaround in
+// ptracer.cpp), and module loading leaves `jit-cache-zygisk` / `memfd:`
+// / `zygisk-module` backing-file names in /proc/<pid>/maps.  Detection
+// apps read both files to flag Zygote as being traced / injected.  We
+// rewrite the offending fields in-place so the caller never sees them.
 DCL_HOOK_FUNC(ssize_t, read, int fd, void *buf, size_t count) {
     ssize_t ret = old_read(fd, buf, count);
     if (ret > 0) {
-        sanitize_tracer_pid_in_buffer(static_cast<char *>(buf), static_cast<size_t>(ret));
+        char *b = static_cast<char *>(buf);
+        size_t n = static_cast<size_t>(ret);
+        sanitize_tracer_pid_in_buffer(b, n);
+        sanitize_maps_in_buffer(b, n);
     }
     return ret;
 }

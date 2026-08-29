@@ -37,6 +37,14 @@ void spoof_zygote_fossil(char *search_from, char *search_to, const char *anchor)
 /// report as read (the rewrite is in-place and never grows the buffer).
 size_t sanitize_tracer_pid_in_buffer(char *buf, size_t nbytes);
 
+/// Strip the pathname from any `/proc/<pid>/maps` line whose backing file
+/// looks like a Zygisk artefact (`jit-cache-zygisk`, `memfd:...`,
+/// `zygisk-module`, ...).  The line is kept (so the row count and address
+/// layout stay identical) but its trailing pathname is blanked, so the
+/// mapping looks anonymous to detection software.  Returns the (possibly
+/// shortened) byte count the caller should report as read.
+size_t sanitize_maps_in_buffer(char *buf, size_t nbytes);
+
 void send_seccomp_event_if_needed();
 
 std::vector<mount_info> check_zygote_traces(uint32_t info_flags);

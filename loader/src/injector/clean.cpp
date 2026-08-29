@@ -180,3 +180,87 @@ size_t sanitize_tracer_pid_in_buffer(char *buf, size_t nbytes) {
     }
     return nbytes;
 }
+
+// ---------------------------------------------------------------------------
+// /proc/<pid>/maps path hiding
+//
+// Detection apps read /proc/self/maps and look for backing-file names that
+// betray a Zygisk installation:
+//   - `jit-cache-zygisk`  — the display name DlopenMem passes to
+//     android_dlopen_ext when loading a module from a memfd.
+//   - `memfd:...`         — a raw memfd_create file backing an exec mapping
+//     (remote_csoloader or system-linker fd load).
+//   - `zygisk-module`     — the on-disk path of a Zygisk module .so.
+//
+// We cannot mremap-anonymize these mappings in general: third-party module
+// code may still be executing, and replacing its .text would crash the
+// process.  Instead we PLT-hook `read` and strip the pathname field from
+// any maps line whose path matches one of those markers.  The line itself
+// is kept (address/perms/offset/dev/inode stay), so the row count and the
+// address layout reported to the caller are unchanged — only the trailing
+// pathname is blanked, making the mapping look anonymous.
+//
+// Because /proc/<pid>/maps is a seq_file and a single read() may return a
+// partial line or span multiple lines, we scan the whole buffer and only
+// rewrite a line when we can see its terminating '\n' (or EOF).  A partial
+// line at the end of the buffer is left untouched — the next read will
+// bring the rest and we'll sanitize it then.
+size_t sanitize_maps_in_buffer(char *buf, size_t nbytes) {
+    if (buf == nullptr || nbytes == 0) return nbytes;
+
+    // Markers that identify a Zygisk-related backing file in a maps line.
+    static constexpr std::string_view kMarkers[] = {
+        "jit-cache-zygisk",
+        "memfd:",
+        "zygisk-module",
+    };
+
+    size_t i = 0;
+    while (i < nbytes) {
+        // Find the start of the pathname field: the 6th whitespace-separated
+        // column in a maps line.  We scan forward from the line start and
+        // count fields.  A maps line looks like:
+        //   12c00000-12c10000 r-xp 00000000 fe:00 1234 /path/to/lib (deleted)
+        size_t line_start = i;
+        size_t field = 0;
+        size_t path_start = i;
+        size_t j = i;
+        for (; j < nbytes; ++j) {
+            if (buf[j] == '\n') break;
+            if (buf[j] == ' ' || buf[j] == '\t') {
+                // Skip runs of whitespace between fields.
+                while (j < nbytes && (buf[j] == ' ' || buf[j] == '\t')) ++j;
+                ++field;
+                if (field == 5) {  // path is the 6th field (0-indexed 5)
+                    path_start = j;
+                }
+                --j;  // the for-loop will ++j back to the next non-ws char
+            }
+        }
+
+        // Only rewrite when we have a complete line (terminated by '\n' or
+        // end of buffer).  j is either at '\n' or at nbytes.
+        bool complete = (j < nbytes && buf[j] == '\n');
+        if (complete && field >= 5) {
+            // Check whether the pathname contains any marker.
+            std::string_view path(buf + path_start, j - path_start);
+            bool matched = false;
+            for (auto m : kMarkers) {
+                if (path.find(m) != std::string_view::npos) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched) {
+                // Blank the pathname field (replace with spaces, keep the
+                // trailing newline).  This keeps the line length identical
+                // so downstream parsers that key on offsets are unaffected.
+                for (size_t k = path_start; k < j; ++k) buf[k] = ' ';
+                LOGV("hid maps path in line at offset %zu", line_start);
+            }
+        }
+
+        i = (j < nbytes) ? j + 1 : j;  // advance past '\n'
+    }
+    return nbytes;
+}

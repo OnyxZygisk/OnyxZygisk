@@ -1,0 +1,11 @@
+.{
+    .fingerprint = 0xd520d12e161eb680,
+    .name = .onyxzygisk_loader_core,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.14.1",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
