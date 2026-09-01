@@ -20,7 +20,10 @@ Design goals:
 
 ## On-disk layout
 
-Nodes live under the OnyxZygisk work directory (`/data/adb/onyxzygisk`):
+Nodes can be installed in either the original OnyxZygisk work directory or as
+ordinary Magisk modules. A directory under `/data/adb/modules` is recognized as
+an FN module only when it contains `fn.prop`, so existing Magisk modules are
+not affected.
 
 ```
 /data/adb/onyxzygisk/fn/<node-id>/
@@ -34,6 +37,21 @@ Nodes live under the OnyxZygisk work directory (`/data/adb/onyxzygisk`):
 ├── remove             # state flag: node is uninstalled on next daemon sweep
 └── update             # state flag: pending update, replace on next sweep
 ```
+
+```text
+/data/adb/modules/<node-id>/
+├── module.prop        # standard Magisk module metadata
+├── fn.prop            # OnyxZygisk FN descriptor
+├── service.sh         # optional FN boot script
+├── post-fs-data.sh    # optional FN post-fs-data script
+└── lib/<abi>/fn.so    # optional native FN entry library
+```
+
+Magisk's `disable`, `remove`, and `update` flags are honored for these modules.
+Magisk owns `post-fs-data.sh` and `service.sh` for standard FN modules, while
+OnyxZygisk owns those scripts for workdir nodes. This avoids running a Magisk
+module's lifecycle script twice. Native entries from both formats are still
+loaded by OnyxZygisk according to `trigger`, `scope`, and `apps`.
 
 State flags follow the Magisk module convention so existing tooling intuition
 carries over.
@@ -140,5 +158,4 @@ fn/hello/            # zip root: fn.prop + service.sh
 └── service.sh       # #!/system/bin/sh\necho hello > /data/local/tmp/hello.txt
 ```
 
-See `docs/examples/` for a ready-to-install zip (source + build instructions).
-
+See `docs/examples/` for ready-to-install workdir and Magisk package examples.

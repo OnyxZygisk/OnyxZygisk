@@ -1,0 +1,9 @@
+id=onyx-fn-hello
+name=Onyx FN Hello
+version=1.0
+versionCode=1
+author=OnyxZygisk
+description=Example FN Magisk module
+trigger=boot
+scope=all
+ui.summary=Writes a marker after boot completion

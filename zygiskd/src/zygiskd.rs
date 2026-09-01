@@ -1638,7 +1638,7 @@ fn handle_request_fn_companion_socket(
         return Ok(());
     };
     let entry = node.entry.as_deref().unwrap_or_default();
-    let lib_path = format!("{}/fn/{}/{}", TMP_PATH.get().unwrap(), node.id, entry);
+    let lib_path = node.dir.join(entry);
     let lib_fd = create_library_fd(Path::new(&lib_path))?;
 
     let companions = &mut *context.fn_companions.lock().unwrap();
@@ -1700,7 +1700,7 @@ fn handle_get_module_dir(stream: &mut UnixStream) -> Result<()> {
         let Some(node) = nodes.get(fn_index) else {
             bail!("Unknown module index {}", index);
         };
-        r#fn::get_fn_module_dir(TMP_PATH.get().unwrap(), &node.id)?
+        fs::File::open(&node.dir)?
     };
     stream.send_fd(dir.as_raw_fd())?;
     Ok(())
@@ -1748,7 +1748,7 @@ fn handle_read_fn_modules(stream: &mut UnixStream) -> Result<()> {
     stream.write_usize(nodes.len())?;
     for node in &nodes {
         let entry = node.entry.as_deref().unwrap_or_default();
-        let lib_path = format!("{}/fn/{}/{}", TMP_PATH.get().unwrap(), node.id, entry);
+        let lib_path = node.dir.join(entry);
         let lib_fd = create_library_fd(Path::new(&lib_path))?;
 
         stream.write_string(&node.id)?;

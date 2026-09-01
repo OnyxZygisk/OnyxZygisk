@@ -46,6 +46,9 @@ pub const PATH_MODULES_UPDATE_DIR: &str = "/data/adb/modules_update";
 pub const PATH_APATCH_UPDATE_FLAG: &str = "/data/adb/ap/update";
 /// The name of the FN (Functional Node) directory inside the daemon work directory.
 pub const PATH_FN_DIR: &str = "fn";
+/// Magisk module root. FN packages may be installed directly as ordinary
+/// Magisk modules; those directories are discovered by their `fn.prop` file.
+pub const PATH_MAGISK_MODULES_DIR: &str = "/data/adb/modules";
 
 // --- IPC Constants ---
 // These are magic numbers used in communication with the controller.

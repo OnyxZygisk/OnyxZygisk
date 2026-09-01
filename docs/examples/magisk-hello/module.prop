@@ -1,0 +1,6 @@
+id=onyx-fn-hello
+name=Onyx FN Hello
+version=1.0
+versionCode=1
+author=OnyxZygisk
+description=Example Magisk module backed by an OnyxZygisk FN node
