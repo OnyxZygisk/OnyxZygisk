@@ -86,6 +86,14 @@ mod zygiskd;
 use crate::constants::ZKSU_VERSION;
 use log::error;
 
+fn ignore_sigpipe() {
+    // A closed Unix-socket peer must become a normal I/O error rather than
+    // terminating the daemon or a module companion process.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+}
+
 /// Initializes the Android logger with a specific tag.
 fn init_android_logger(tag: &str) {
     android_logger::init_once(
@@ -97,6 +105,7 @@ fn init_android_logger(tag: &str) {
 
 /// Parses command-line arguments and dispatches to the correct logic.
 fn start() {
+    ignore_sigpipe();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("companion") => {

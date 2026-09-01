@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <unwind.h>
 
@@ -178,6 +179,73 @@ DCL_HOOK_FUNC(int, property_get, const char *key, char *value, const char *defau
     return old_property_get(key, value, default_value);
 }
 
+using ReopenOrDetachFn = void (*)(const void *, void *);
+static ReopenOrDetachFn old_reopen_or_detach = nullptr;
+
+// Opaque mirror of Android's internal FileDescriptorInfo. This is deliberately
+// best-effort because the type is not part of the stable NDK ABI.
+struct FileDescriptorInfoLayout {
+    int fd;
+    struct stat stat;
+#if defined(__LP64__)
+    unsigned char path_storage[24];
+#else
+    unsigned char path_storage[12];
+#endif
+    int open_flags;
+    int fd_flags;
+    int fs_flags;
+    off_t offset;
+    bool is_sock;
+};
+
+static bool read_file_descriptor_info(const void *object, int &fd, const char *&path,
+                                     bool &is_sock) {
+    if (object == nullptr) return false;
+
+    const auto &info = *reinterpret_cast<const FileDescriptorInfoLayout *>(object);
+    fd = info.fd;
+    is_sock = info.is_sock;
+    const auto *bytes = info.path_storage;
+    if ((bytes[0] & 1u) == 0) {
+        const size_t length = bytes[0] >> 1;
+        if (length >= sizeof(info.path_storage)) return false;
+        path = reinterpret_cast<const char *>(bytes + 1);
+    } else {
+#if defined(__LP64__)
+        constexpr size_t data_offset = 16;
+#else
+        constexpr size_t data_offset = 8;
+#endif
+        std::memcpy(&path, bytes + data_offset, sizeof(path));
+        if (path == nullptr) return false;
+    }
+    return fd >= 0 && path != nullptr;
+}
+
+static void new_reopen_or_detach(const void *object, void *fail_fn) {
+    if (old_reopen_or_detach == nullptr) return;
+
+    int fd = -1;
+    const char *path = nullptr;
+    bool is_sock = false;
+    if (!read_file_descriptor_info(object, fd, path, is_sock)) {
+        old_reopen_or_detach(object, fail_fn);
+        return;
+    }
+
+    constexpr std::string_view boot_image = "/memfd:/boot-image-methods.art";
+    if (is_sock || std::string_view(path).starts_with(boot_image) || access(path, F_OK) == 0) {
+        old_reopen_or_detach(object, fail_fn);
+        return;
+    }
+
+    // A root-module overlay may have disappeared after zygote opened the FD.
+    // Detach that stale descriptor instead of invoking the framework abort path.
+    LOGV("detaching unavailable zygote file descriptor %d (%s)", fd, path);
+    close(fd);
+}
+
 // We cannot directly call `munmap` to unload ourselves, otherwise when `munmap` returns,
 // it will return to our code which has been unmapped, causing segmentation fault.
 // Instead, we hook `pthread_attr_setstacksize` which will be called when VM daemon threads start.
@@ -307,6 +375,12 @@ void HookContext::hook_plt() {
     PLT_HOOK_REGISTER(android_runtime_dev, android_runtime_inode, unshare);
     PLT_HOOK_REGISTER(android_runtime_dev, android_runtime_inode, strdup);
     PLT_HOOK_REGISTER(android_runtime_dev, android_runtime_inode, property_get);
+    if (android_runtime_dev != 0 && android_runtime_inode != 0) {
+        register_hook(android_runtime_dev, android_runtime_inode,
+                      "_ZNK18FileDescriptorInfo14ReopenOrDetach",
+                      reinterpret_cast<void *>(new_reopen_or_detach),
+                      reinterpret_cast<void **>(&old_reopen_or_detach));
+    }
     // Hook read() in libc.so so any library that reads /proc/<pid>/status
     // (including detection apps using libc directly) gets a sanitized
     // TracerPid line.  See sanitize_tracer_pid_in_buffer.

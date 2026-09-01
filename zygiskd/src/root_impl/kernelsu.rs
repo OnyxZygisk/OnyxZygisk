@@ -15,7 +15,8 @@
 //! avoiding any repeated detection overhead.
 
 use crate::constants::{MAX_KSU_VERSION, MIN_KSU_VERSION};
-use log::warn;
+use crate::utils::get_property;
+use log::{info, warn};
 use std::ffi::c_char;
 use std::fs;
 use std::os::fd::RawFd;
@@ -81,6 +82,7 @@ const KSU_IOCTL_GET_INFO: u32 = 0x80004B02;          // nr=2, dir=R
 const KSU_IOCTL_UID_GRANTED_ROOT: u32 = 0xC0004B08;  // nr=8, dir=RW
 const KSU_IOCTL_UID_SHOULD_UMOUNT: u32 = 0xC0004B09; // nr=9, dir=RW
 const KSU_IOCTL_GET_MANAGER_UID: u32 = 0x80004B0A;   // nr=10, dir=R
+const KSU_IOCTL_GET_HOOK_MODE: u32 = 0x80004B62;     // nr=98, dir=R; KernelSU Next
 
 /// Data structures for ioctl commands.
 /// The `#[repr(C)]` attribute is critical to ensure that the memory layout of these
@@ -108,6 +110,11 @@ struct KsuUidShouldUmountCmd {
 #[repr(C)]
 struct KsuGetManagerUidCmd {
     uid: u32,
+}
+
+#[repr(C)]
+struct KsuGetHookModeCmd {
+    mode: [c_char; 16],
 }
 
 // --- Legacy `prctl` Interface Constants ---
@@ -163,7 +170,9 @@ pub fn detect_version() -> Option<Version> {
                 if version_code > 0 {
                     // Success! A valid version was returned via ioctl.
                     let method = Method::Ioctl(fd);
-                    if MIN_KSU_VERSION <= version_code && Path::new("/data/adb/ksud").exists() {
+                    let variant = ioctl_variant(fd);
+                    info!("Detected KernelSU variant: {:?}", variant);
+                    if MIN_KSU_VERSION <= version_code && ksud_exists() {
                         if version_code > MAX_KSU_VERSION {
                             warn!("Support for current KernelSU (variant) could be incomplete")
                         }
@@ -203,7 +212,7 @@ pub fn detect_version() -> Option<Version> {
             // Success with prctl. We must now probe for legacy capabilities.
             init_legacy_variant_probe();
             let method = Method::Prctl;
-            if MIN_KSU_VERSION <= version_code && Path::new("/data/adb/ksud").exists() {
+            if MIN_KSU_VERSION <= version_code && ksud_exists() {
                 if version_code > MAX_KSU_VERSION {
                     warn!("Support for current KernelSU (variant) could be incomplete")
                 }
@@ -290,6 +299,15 @@ fn init_driver_fd() -> Option<RawFd> {
         return Some(fd);
     }
 
+    // Waydroid may block the KernelSU SYS_reboot probe with seccomp. The
+    // legacy prctl interface remains available there, so skip the probe.
+    if get_property("ro.board.platform")
+        .ok()
+        .is_some_and(|platform| platform.eq_ignore_ascii_case("waydroid"))
+    {
+        return None;
+    }
+
     let mut fd: RawFd = -1;
     unsafe {
         // Safety: This is a raw syscall. The kernel expects specific magic numbers
@@ -303,6 +321,21 @@ fn init_driver_fd() -> Option<RawFd> {
         );
     }
     if fd >= 0 { Some(fd) } else { None }
+}
+
+fn ksud_exists() -> bool {
+    Path::new("/data/adb/ksud").exists() || Path::new("/data/adb/ksu/bin/ksud").exists()
+}
+
+fn ioctl_variant(fd: RawFd) -> KernelSuVariant {
+    let mut cmd = KsuGetHookModeCmd { mode: [0; 16] };
+    if ksuctl_ioctl(fd, KSU_IOCTL_GET_HOOK_MODE, &mut cmd).is_ok()
+        && cmd.mode.iter().any(|value| *value != 0)
+    {
+        KernelSuVariant::Next
+    } else {
+        KernelSuVariant::Official
+    }
 }
 
 /// A safe, generic wrapper around the `ioctl` syscall, matching the style of the
@@ -344,7 +377,8 @@ fn uid_should_umount_ioctl(fd: RawFd, uid: i32) -> bool {
 fn uid_is_manager_ioctl(fd: RawFd, uid: i32) -> bool {
     let mut cmd = KsuGetManagerUidCmd { uid: 0 };
     if ksuctl_ioctl(fd, KSU_IOCTL_GET_MANAGER_UID, &mut cmd).is_ok() {
-        return uid as u32 == cmd.uid;
+        let uid = uid as u32;
+        return uid == cmd.uid || uid % 100000 == cmd.uid;
     }
     false
 }

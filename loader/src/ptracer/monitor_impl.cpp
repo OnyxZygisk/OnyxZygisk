@@ -190,15 +190,27 @@ bool AppMonitor::prepare_environment() {
 }
 
 void AppMonitor::run() {
-    socket_handler_.Init();
-    ptrace_handler_.Init();
+    if (!socket_handler_.Init()) {
+        request_exit();
+        return;
+    }
+    if (!ptrace_handler_.Init()) {
+        request_exit();
+        return;
+    }
     // Must run after ptrace_handler_.Init() has seized init with
     // PTRACE_O_TRACEFORK, so a kill here is guaranteed to be observed as a
     // fresh fork+exec once init respawns zygote.
     kill_stale_zygote_if_running(zygote_.program_path_);
-    event_loop_.Init();
-    event_loop_.RegisterHandler(socket_handler_, EPOLLIN | EPOLLET);
-    event_loop_.RegisterHandler(ptrace_handler_, EPOLLIN | EPOLLET);
+    if (!event_loop_.Init()) {
+        request_exit();
+        return;
+    }
+    if (!event_loop_.RegisterHandler(socket_handler_, EPOLLIN | EPOLLET) ||
+        !event_loop_.RegisterHandler(ptrace_handler_, EPOLLIN | EPOLLET)) {
+        request_exit();
+        return;
+    }
     event_loop_.Loop();
 }
 
@@ -257,6 +269,8 @@ bool AppMonitor::SocketHandler::Init() {
     socklen_t socklen = sizeof(sa_family_t) + strlen(addr.sun_path);
     if (bind(sock_fd_, (struct sockaddr *) &addr, socklen) == -1) {
         PLOGE("bind socket");
+        close(sock_fd_);
+        sock_fd_ = -1;
         return false;
     }
     return true;
@@ -353,7 +367,12 @@ bool AppMonitor::SigChldHandler::Init() {
         PLOGE("create signalfd");
         return false;
     }
-    ptrace(PTRACE_SEIZE, 1, 0, PTRACE_O_TRACEFORK);
+    if (ptrace(PTRACE_SEIZE, 1, 0, PTRACE_O_TRACEFORK) == -1) {
+        PLOGE("ptrace(PTRACE_SEIZE) init");
+        close(signal_fd_);
+        signal_fd_ = -1;
+        return false;
+    }
     return true;
 }
 

@@ -69,6 +69,9 @@ impl FnStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FnNode {
     pub id: String,
+    /// On-disk node directory. This may be either workdir/fn/<id> or a
+    /// standard Magisk module directory under /data/adb/modules/<id>.
+    pub dir: PathBuf,
     pub name: String,
     pub version: String,
     pub version_code: i32,
@@ -89,6 +92,12 @@ pub struct FnNode {
 /// Returns the directory holding all FN nodes for a given daemon work directory.
 fn fn_root(work_dir: &str) -> PathBuf {
     Path::new(work_dir).join(constants::PATH_FN_DIR)
+}
+
+fn is_standard_magisk_module(dir: &Path) -> bool {
+    dir.parent().is_some_and(|parent| {
+        parent == Path::new(constants::PATH_MAGISK_MODULES_DIR)
+    })
 }
 
 /// Checks that a node id is safe and spec-compliant (`[a-z0-9_\-]`).
@@ -144,6 +153,7 @@ fn parse_fn_node(dir: &Path) -> FnNode {
 
     let malformed = |reason: &str| FnNode {
         id: id.clone(),
+        dir: dir.to_path_buf(),
         name: id.clone(),
         version: String::new(),
         version_code: 0,
@@ -230,6 +240,7 @@ fn parse_fn_node(dir: &Path) -> FnNode {
 
     FnNode {
         id,
+        dir: dir.to_path_buf(),
         name,
         version,
         version_code,
@@ -250,41 +261,62 @@ fn parse_fn_node(dir: &Path) -> FnNode {
 /// the remaining descriptors, and returns the nodes sorted by priority then id.
 pub fn scan_fn_nodes(work_dir: &str) -> Vec<FnNode> {
     let mut nodes = Vec::new();
-    let root = fn_root(work_dir);
-    let dir = match fs::read_dir(&root) {
-        Ok(dir) => dir,
-        Err(e) => {
-            debug!("Failed to read FN node directory {:?}: {}", root, e);
-            return nodes;
-        }
-    };
+    let roots = [
+        fn_root(work_dir),
+        Path::new(constants::PATH_MAGISK_MODULES_DIR).to_path_buf(),
+    ];
+    let mut seen_ids = std::collections::HashSet::new();
 
-    for entry in dir.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let id = entry.file_name().to_string_lossy().into_owned();
+    for root in roots {
+        let dir = match fs::read_dir(&root) {
+            Ok(dir) => dir,
+            Err(e) => {
+                debug!("Failed to read FN node directory {:?}: {}", root, e);
+                continue;
+            }
+        };
 
-        if path.join("remove").exists() {
-            match fs::remove_dir_all(&path) {
-                Ok(()) => {
-                    info!("Removed FN node `{}`", id);
-                    continue;
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if !path.is_dir()
+                || (is_standard_magisk_module(&path) && !path.join("fn.prop").is_file())
+            {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if !seen_ids.insert(id.clone()) {
+                continue;
+            }
+
+            if path.join("remove").exists() && is_standard_magisk_module(&path) {
+                let mut node = parse_fn_node(&path);
+                if !matches!(node.status, FnStatus::Malformed(_)) {
+                    node.status = FnStatus::PendingRemove;
                 }
-                Err(e) => {
-                    warn!("Failed to remove FN node `{}`: {}", id, e);
-                    let mut node = parse_fn_node(&path);
-                    if !matches!(node.status, FnStatus::Malformed(_)) {
-                        node.status = FnStatus::PendingRemove;
+                nodes.push(node);
+                continue;
+            }
+
+            if path.join("remove").exists() {
+                match fs::remove_dir_all(&path) {
+                    Ok(()) => {
+                        info!("Removed FN node `{}`", id);
+                        continue;
                     }
-                    nodes.push(node);
-                    continue;
+                    Err(e) => {
+                        warn!("Failed to remove FN node `{}`: {}", id, e);
+                        let mut node = parse_fn_node(&path);
+                        if !matches!(node.status, FnStatus::Malformed(_)) {
+                            node.status = FnStatus::PendingRemove;
+                        }
+                        nodes.push(node);
+                        continue;
+                    }
                 }
             }
-        }
 
-        nodes.push(parse_fn_node(&path));
+            nodes.push(parse_fn_node(&path));
+        }
     }
 
     nodes.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
@@ -296,10 +328,11 @@ pub fn set_fn_node_enabled(work_dir: &str, id: &str, enabled: bool) -> Result<()
     if !is_valid_id(id) {
         bail!("Invalid FN node id: `{}`", id);
     }
-    let dir = fn_root(work_dir).join(id);
-    if !dir.is_dir() {
-        bail!("FN node `{}` does not exist", id);
-    }
+    let dir = scan_fn_nodes(work_dir)
+        .into_iter()
+        .find(|node| node.id == id)
+        .map(|node| node.dir)
+        .ok_or_else(|| anyhow::anyhow!("FN node `{}` does not exist", id))?;
     let flag = dir.join("disable");
     if enabled {
         match fs::remove_file(&flag) {
@@ -320,13 +353,18 @@ pub fn mark_fn_node_removed(work_dir: &str, id: &str) -> Result<()> {
     if !is_valid_id(id) {
         bail!("Invalid FN node id: `{}`", id);
     }
-    let dir = fn_root(work_dir).join(id);
-    if !dir.is_dir() {
-        bail!("FN node `{}` does not exist", id);
-    }
+    let dir = scan_fn_nodes(work_dir)
+        .into_iter()
+        .find(|node| node.id == id)
+        .map(|node| node.dir)
+        .ok_or_else(|| anyhow::anyhow!("FN node `{}` does not exist", id))?;
     fs::write(dir.join("remove"), []).context("Failed to create remove flag")?;
-    fs::remove_dir_all(&dir).context("Failed to sweep FN node")?;
-    info!("Removed FN node `{}`", id);
+    if is_standard_magisk_module(&dir) {
+        info!("Marked Magisk FN module `{}` for removal", id);
+    } else {
+        fs::remove_dir_all(&dir).context("Failed to sweep FN node")?;
+        info!("Removed FN node `{}`", id);
+    }
     Ok(())
 }
 
@@ -499,6 +537,7 @@ fn run_script_logged(node: &FnNode, script: PathBuf, node_dir: PathBuf) {
         .arg(&script)
         .current_dir(&node_dir)
         .env("MODDIR", &node_dir)
+        .env("ONYX_FN_DAEMON", "1")
         .output();
     match output {
         Ok(output) => {
@@ -526,8 +565,9 @@ fn run_script_logged(node: &FnNode, script: PathBuf, node_dir: PathBuf) {
 }
 
 /// Runs the stage script (`post-fs-data.sh` or `service.sh`) of every enabled
-/// node whose `trigger` includes the given stage, in priority order, in the
-/// background. Invoked by the daemon at boot and when system_server starts.
+/// workdir node whose `trigger` includes the given stage. Standard Magisk FN
+/// modules own these scripts through Magisk's lifecycle and are skipped here,
+/// preventing the same script from running twice.
 pub fn run_fn_scripts(work_dir: &str, trigger: &str) {
     let script_name = match trigger {
         "post_fs_data" => "post-fs-data.sh",
@@ -542,10 +582,13 @@ pub fn run_fn_scripts(work_dir: &str, trigger: &str) {
         if node.status != FnStatus::Enabled {
             continue;
         }
+        if is_standard_magisk_module(&node.dir) {
+            continue;
+        }
         if !node.triggers.iter().any(|t| t == trigger) {
             continue;
         }
-        let node_dir = fn_root(work_dir).join(&node.id);
+        let node_dir = node.dir.clone();
         let Some(script) = script_for_trigger(&node_dir, trigger) else {
             continue;
         };
@@ -577,10 +620,11 @@ pub fn get_fn_module_dir(work_dir: &str, id: &str) -> Result<fs::File> {
     if !is_valid_id(id) {
         bail!("Invalid FN node id: `{}`", id);
     }
-    let dir = fn_root(work_dir).join(id);
-    if !dir.is_dir() {
-        bail!("FN node `{}` does not exist", id);
-    }
+    let dir = scan_fn_nodes(work_dir)
+        .into_iter()
+        .find(|node| node.id == id)
+        .map(|node| node.dir)
+        .ok_or_else(|| anyhow::anyhow!("FN node `{}` does not exist", id))?;
     fs::File::open(dir).context("Failed to open FN node directory")
 }
 

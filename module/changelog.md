@@ -1,3 +1,12 @@
+## v1.08 - ReZygisk compatibility and Magisk FN modules
+
+* Added ReZygisk-compatible `SIGPIPE` protection for the daemon and companion processes.
+* Added a best-effort `FileDescriptorInfo::ReopenOrDetach` hook for stale root-overlay file descriptors.
+* Improved KernelSU Next detection, Waydroid fallback handling, Private Space manager UID matching, and `ksud` path compatibility.
+* Added Samsung Android B Zygote JNI signature support.
+* Added standard Magisk-installed FN modules with `fn.prop` discovery, native entry loading, and Magisk lifecycle ownership.
+* Added a Magisk FN example package and validated the Zig loader core with Zig 0.14.1.
+
 ## 🧬 v1.1 - WebUI, FN Phase 2 & APatch Deep Adaptation 🧬
 
 ### 🌐 Built-in WebUI (manager app removed)

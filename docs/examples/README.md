@@ -77,3 +77,17 @@ void zygisk_module_entry(void *api, void *env) {
 
 `fn.prop` 中声明 `entry=lib/arm64-v8a/fn.so`（lib 目录按 ABI 放库文件），
 `trigger=app` 表示注入到应用进程，`scope`/`apps` 控制目标应用集合。
+
+## 作为 Magisk 模块安装
+
+FN 节点也可以直接制作成标准 Magisk 模块。目录必须同时包含
+`module.prop` 和 `fn.prop`，然后打包并在 Magisk Manager 中刷入：
+
+```sh
+cd magisk-hello
+zip -r ../hello-fn-magisk.zip module.prop fn.prop service.sh
+```
+
+OnyxZygisk 通过 `fn.prop` 识别该模块，不会把普通 Magisk 模块当成 FN
+节点。标准 Magisk 模块的 `post-fs-data.sh` 和 `service.sh` 由 Magisk
+负责执行，OnyxZygisk 不会重复调度它们。
