@@ -2,7 +2,7 @@
 # 自动检查依赖新版本并开 PR，由管理员审阅后合并。
 version: 2
 updates:
-  # WebUI (Vue 3 + Vite + TypeScript) 依赖
+  # WebUI (React 19 + Vite + Tailwind CSS, Biome + Playwright) 依赖
   - package-ecosystem: "npm"
     directory: "/zygiskd/webui"
     schedule:
