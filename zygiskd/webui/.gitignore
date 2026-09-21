@@ -24,6 +24,7 @@ tests/site/*-snapshots/
 # Local review screenshots
 .tmp-shots/
 
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

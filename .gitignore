@@ -12,9 +12,11 @@ target
 zygiskd/webui/node_modules/
 zygiskd/webui/dist/
 
-# pnpm's content-addressable store lives inside the workspace so installs do
-# not depend on a writable home directory.
+# pnpm's content-addressable store and Playwright's browser bundle live inside
+# the workspace so installs do not depend on a writable home directory. Point
+# PLAYWRIGHT_BROWSERS_PATH at .playwright-browsers when running the site specs.
 .pnpm-store/
+.playwright-browsers/
 
 # Agent / tooling scratch
 .zcode/

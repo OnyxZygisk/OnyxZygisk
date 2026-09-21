@@ -1,7 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { getBridge, setBridge } from "./bridge";
-import { createDevBridge } from "./bridge/dev";
 import { i18n } from "./i18n";
 import "./styles/theme.css";
 import {
@@ -19,10 +18,16 @@ if (root === null) {
 const hasHostBridge = getBridge().isWebui();
 
 if (import.meta.env.DEV && !hasHostBridge) {
-	// Development and Playwright run outside a WebView. Installing the stand-in
-	// lets them exercise the production code path in cli.ts. This branch is
-	// compiled out of release builds, so a shipped WebUI can never present
-	// fabricated device state.
+	/*
+	 * Development and Playwright run outside a WebView. Installing the stand-in
+	 * lets them exercise the production code path in cli.ts.
+	 *
+	 * Imported dynamically rather than at the top: a static import keeps the
+	 * module in the entry chunk even when the branch is compiled away, which
+	 * would ship the code that fabricates device state. The release guard in
+	 * tests/unit/bundle.test.mjs asserts its absence.
+	 */
+	const { createDevBridge } = await import("./bridge/dev");
 	setBridge(createDevBridge());
 }
 

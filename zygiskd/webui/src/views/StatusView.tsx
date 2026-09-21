@@ -98,7 +98,10 @@ export function StatusView({ snapshot }: StatusViewProps) {
 						<span className="text-onx-caption text-onx-muted">
 							{tr("status_modules_count", "Zygisk modules")}
 						</span>
-						<span className="text-onx-display text-onx-on">
+						<span
+							data-testid="status-module-count"
+							className="text-onx-display text-onx-on"
+						>
 							{state?.modules.length ?? 0}
 						</span>
 					</div>
@@ -106,7 +109,10 @@ export function StatusView({ snapshot }: StatusViewProps) {
 						<span className="text-onx-caption text-onx-muted">
 							{tr("status_fn_count", "FN nodes")}
 						</span>
-						<span className="text-onx-display text-onx-on">
+						<span
+							data-testid="status-fn-count"
+							className="text-onx-display text-onx-on"
+						>
 							{state?.fns.length ?? 0}
 						</span>
 					</div>
