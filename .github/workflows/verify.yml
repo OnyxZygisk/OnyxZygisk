@@ -28,7 +28,7 @@ jobs:
           submodules: recursive
       - uses: pnpm/action-setup@v4
         with:
-          version: 11.17.0
+          version: 11.25.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -37,15 +37,28 @@ jobs:
       - name: Install dependencies
         working-directory: zygiskd/webui
         run: pnpm install --frozen-lockfile
-      - name: Typecheck
+      # biome ci, not pnpm lint: the lint script rewrites files, which a check
+      # job must never do.
+      - name: Format and lint
         working-directory: zygiskd/webui
-        run: pnpm typecheck
-      - name: Unit tests
+        run: pnpm check:biome
+      - name: Type-check
+        working-directory: zygiskd/webui
+        run: pnpm type-check
+      # The unit guards scan the real build output (the compiled stylesheet and
+      # the emitted scripts), so they need a build first.
+      - name: Build
+        working-directory: zygiskd/webui
+        run: pnpm build
+      - name: Unit guards
         working-directory: zygiskd/webui
         run: pnpm test
-      - name: Lint
+      - name: Install Playwright browsers
         working-directory: zygiskd/webui
-        run: pnpm lint
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Behaviour and accessibility
+        working-directory: zygiskd/webui
+        run: pnpm test:e2e
 
   android:
     name: Android release package
@@ -69,7 +82,7 @@ jobs:
         run: cargo install cargo-ndk --version 3.5.4 --locked
       - uses: pnpm/action-setup@v4
         with:
-          version: 11.17.0
+          version: 11.25.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24

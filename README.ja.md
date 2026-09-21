@@ -31,7 +31,7 @@ ptrace ベースの Zygisk 実装。WebUI 内蔵、ホットスワップ対応�
 
 ### 内蔵 WebUI
 
-Vue 3 + Vite + TypeScript で構築されたフル機能のコントロールパネル。KernelSU / APatch Manager / MMRL がローカルで読み取り — ネットワークポート不要、サーバープロセス不要。ダッシュボード、モジュール一覧、FN 管理、logcat ビューア。ライト / ダーク / AMOLED テーマ対応。[詳細 →](docs/WEBUI.md)
+React + Vite + Tailwind CSS で構築されたフル機能のコントロールパネル。KernelSU / APatch Manager / MMRL がローカルで読み取り — ネットワークポート不要、サーバープロセス不要。ステータス、モジュール一覧、FN 管理、logcat ビューア、設定。厳密にモノクロームなデザインで、ライト / ダーク / ピュアブラックのテーマに対応。[詳細 →](docs/WEBUI.md)
 
 ### 高度なステルス
 
