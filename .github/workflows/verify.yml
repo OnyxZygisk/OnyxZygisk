@@ -67,11 +67,23 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          # build.gradle.kts derives verCode from `git rev-list HEAD --count`,
+          # which returns 1 on the default shallow (fetch-depth: 1) clone.
+          # Without full history the released module reports versionCode 4
+          # instead of the real commit count.
+          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
-      - uses: android-actions/setup-android@v3
+      # v3 defaults its `packages` input to 'tools platform-tools', but Google
+      # has removed the `tools` package from the SDK repository, so the action
+      # aborts before anything is built:
+      #     Warning: Failed to find package 'tools'
+      #     Error: sdkmanager failed with exit code 1
+      # v4.0.2 fixes exactly this; its default is 'platform-tools' only. The
+      # explicit sdkmanager step below still installs every component we need.
+      - uses: android-actions/setup-android@v4
       - name: Install Android toolchain
         run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
