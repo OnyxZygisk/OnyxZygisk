@@ -1,6 +1,9 @@
 # pnpm 11: package-manager settings live in pnpm-workspace.yaml (the `pnpm`
-# field in package.json is no longer read). Approve esbuild's postinstall so
-# its native binary is set up; without this pnpm blocks it and vite/vitest
-# break at runtime.
+# field in package.json is no longer read). These postinstall scripts are
+# approved so their native binaries are set up; without this pnpm blocks them
+# and vite / tailwind break at runtime.
 allowBuilds:
   esbuild: true
+  '@tailwindcss/oxide': true
+minimumReleaseAgeExclude:
+  - kernelsu-alt@3.1.2
