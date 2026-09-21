@@ -87,5 +87,6 @@
 	<string name="settings_mount_mode_setns">命名空间切换</string>
 	<string name="settings_mount_mode_global">全局挂载</string>
 	<string name="settings_about_section">关于</string>
+	<string name="settings_authors">作者</string>
 	<string name="settings_about_text">基于 ptrace 的 Zygisk 实现，支持 FN（Functional Node）模块。fork 自 NeoZygisk。</string>
 </resources>

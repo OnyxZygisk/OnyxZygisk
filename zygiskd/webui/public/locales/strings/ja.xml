@@ -87,5 +87,6 @@
 	<string name="settings_mount_mode_setns">名前空間切替</string>
 	<string name="settings_mount_mode_global">グローバル</string>
 	<string name="settings_about_section">このモジュールについて</string>
+	<string name="settings_authors">作者</string>
 	<string name="settings_about_text">ptrace ベースの Zygisk 実装で、FN（Functional Node）モジュールに対応しています。NeoZygisk のフォークです。</string>
 </resources>

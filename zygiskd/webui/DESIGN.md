@@ -517,6 +517,10 @@ No component hard-codes user-visible copy. Strings arrive from `i18n`, and the c
 need them together (a picker's options, a row's title and summary) take them as a `labels` prop,
 so the owning view supplies the translation rather than the component inventing one.
 
+Product and author names are not translation keys. `MODULE_NAME` and `MODULE_AUTHORS` in
+`module_info.ts` hold them: they are proper nouns, and they read the same in every locale, so a
+translator must not be able to change them.
+
 Three rules, all enforced by `tests/unit/i18n_keys.test.mjs`:
 
 - **Every key used by the sources exists in `en.xml`.** A missing key does not crash — it renders

@@ -281,6 +281,15 @@ test.describe("settings", () => {
 			.toBeLessThan(before);
 	});
 
+	test("credits the module authors", async ({ page }) => {
+		await page.goto("/");
+		await gotoPage(page, "Settings");
+		await expect(main(page).getByText("Authors")).toBeVisible();
+		await expect(
+			main(page).getByText("Sai · Matsuzaka Yuki", { exact: true }),
+		).toBeVisible();
+	});
+
 	// Overlays own one history entry each, so the Android back gesture closes
 	// the topmost layer instead of leaving the WebUI.
 	test("closes the topmost dialog on the back gesture", async ({ page }) => {

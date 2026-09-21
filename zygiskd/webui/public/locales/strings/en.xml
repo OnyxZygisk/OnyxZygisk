@@ -87,5 +87,6 @@
 	<string name="settings_mount_mode_setns">Namespace switch</string>
 	<string name="settings_mount_mode_global">Global</string>
 	<string name="settings_about_section">About</string>
+	<string name="settings_authors">Authors</string>
 	<string name="settings_about_text">A Zygisk implementation via ptrace, with FN (Functional Node) modules. A fork of NeoZygisk.</string>
 </resources>
