@@ -31,7 +31,7 @@
 
 ### 内置 WebUI
 
-基于 Vue 3 + Vite + TypeScript 构建的完整控制面板，由 KernelSU / APatch Manager / MMRL 本地读取 —— 无需网络端口，无需服务进程。仪表盘、模块列表、FN 管理、logcat 查看器。浅色 / 深色 / 纯黑主题。[了解更多 →](docs/WEBUI.md)
+基于 React + Vite + Tailwind CSS 构建的完整控制面板，由 KernelSU / APatch Manager / MMRL 本地读取 —— 无需网络端口，无需服务进程。状态、模块列表、FN 管理、logcat 查看器与设置。严格单色设计，提供浅色 / 深色 / 纯黑主题。[了解更多 →](docs/WEBUI.md)
 
 ### 进阶隐藏
 

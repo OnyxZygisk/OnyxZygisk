@@ -31,7 +31,7 @@ Works out of the box on **APatch**, **KernelSU** (including LKM late-load), and 
 
 ### Built-in WebUI
 
-A full control panel built with Vue 3 + Vite + TypeScript, served locally by KernelSU / APatch Manager / MMRL — no network port, no server process. Dashboard, module list, FN management, logcat viewer. Light / Dark / AMOLED themes. [Learn more →](docs/WEBUI.md)
+A full control panel built with React + Vite + Tailwind CSS, served locally by KernelSU / APatch Manager / MMRL — no network port, no server process. Status, module list, FN management, logcat viewer and settings. A strictly monochrome design in light, dark and pure-black themes. [Learn more →](docs/WEBUI.md)
 
 ### Advanced stealth
 

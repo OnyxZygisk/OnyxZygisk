@@ -36,11 +36,12 @@ val commitHash: String by rootProject.extra
 fun pnpmCommand(): String =
     if (System.getProperty("os.name").lowercase().contains("win")) "pnpm.cmd" else "pnpm"
 
-// The WebUI is a Vue 3 + Vite + TypeScript project living in zygiskd/webui.
-// `webuiInstall` bootstraps dependencies once (pnpm install --frozen-lockfile,
-// only when node_modules is missing); `webuiBuild` runs the production build
-// into zygiskd/webui/dist/, which is what ships as the module's `webroot/`.
-// Building the module zip therefore requires pnpm (Node.js >= 18).
+// The WebUI is a React 19 + Vite + Tailwind CSS project living in
+// zygiskd/webui. `webuiInstall` bootstraps dependencies once (pnpm install
+// --frozen-lockfile, only when node_modules is missing); `webuiBuild` runs the
+// production build into zygiskd/webui/dist/, which is what ships as the
+// module's `webroot/`. Building the module zip therefore requires pnpm
+// (Node.js >= 20).
 val webuiInstall = task<Exec>("webuiInstall") {
     group = "webui"
     workingDir = file("$rootDir/zygiskd/webui")
@@ -58,7 +59,9 @@ val webuiBuild = task<Exec>("webuiBuild") {
     inputs.dir(file("$rootDir/zygiskd/webui/public"))
     inputs.files(
         file("$rootDir/zygiskd/webui/package.json"),
-        file("$rootDir/zygiskd/webui/package-lock.json"),
+        // pnpm, not npm: the lockfile is pnpm-lock.yaml. Declaring a file that
+        // does not exist fails input validation before the task can run.
+        file("$rootDir/zygiskd/webui/pnpm-lock.yaml"),
         file("$rootDir/zygiskd/webui/vite.config.ts"),
         file("$rootDir/zygiskd/webui/tsconfig.json"),
         file("$rootDir/zygiskd/webui/index.html"),

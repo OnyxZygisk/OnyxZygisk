@@ -1,23 +1,14 @@
-<!DOCTYPE html>
-<html lang="en" data-theme="light">
-<head>
-<meta charset="utf-8">
-<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>OnyxZygisk</title>
-</head>
-<body>
-
-<!-- Vue mounts the header + stacked sections here -->
-<main id="app"></main>
-
-<!-- APatch compat: some APatch builds inject the interface as window.apatch
-     rather than window.ksu. Alias it so the KernelSU-style bridge works. -->
-<script>
-  if (typeof window.apatch !== "undefined" && typeof window.ksu === "undefined") {
-    window.ksu = window.apatch;
-  }
-</script>
-<script type="module" src="/src/main.ts"></script>
-</body>
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+		<meta name="color-scheme" content="light dark" />
+		<link rel="stylesheet" type="text/css" href="/internal/insets.css" />
+		<title>OnyxZygisk</title>
+	</head>
+	<body>
+		<div id="app"></div>
+		<script type="module" src="/src/main.tsx"></script>
+	</body>
 </html>

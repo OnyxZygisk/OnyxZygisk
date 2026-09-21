@@ -1,0 +1,220 @@
+@import "tailwindcss";
+
+/*
+ * The OnyxZygisk WebUI is strictly monochrome: every surface, divider and text
+ * tone comes from this grayscale ramp. Introducing any chromatic value is a
+ * build failure — tests/unit/monochrome.test.mjs scans the compiled stylesheet.
+ *
+ * `static` is required: Tailwind otherwise prunes tokens that no utility
+ * references yet, which would leave the light theme without the surfaces its
+ * dark and amoled overrides define.
+ */
+@theme static {
+	--color-onx-bg: #ffffff;
+	--color-onx-surface: #ffffff;
+	--color-onx-container: #f5f5f5;
+	--color-onx-container-high: #ebebeb;
+	--color-onx-on: #000000;
+	--color-onx-muted: #5c5c5c;
+	--color-onx-disabled: #8a8a8a;
+	--color-onx-divider: #e0e0e0;
+	--color-onx-accent: #000000;
+	--color-onx-on-accent: #ffffff;
+	--color-onx-scrim: rgb(0 0 0 / 32%);
+	--color-onx-hairline-strong: rgb(0 0 0 / 14%);
+
+	/* Type roles. Exactly seven exist; a component uses at most two. */
+	--text-onx-display: 28px;
+	--text-onx-display--line-height: 36px;
+	--text-onx-display--font-weight: 600;
+	--text-onx-title: 20px;
+	--text-onx-title--line-height: 28px;
+	--text-onx-title--font-weight: 600;
+	--text-onx-body: 16px;
+	--text-onx-body--line-height: 24px;
+	--text-onx-body--font-weight: 400;
+	--text-onx-body-strong: 16px;
+	--text-onx-body-strong--line-height: 24px;
+	--text-onx-body-strong--font-weight: 500;
+	--text-onx-label: 14px;
+	--text-onx-label--line-height: 20px;
+	--text-onx-label--font-weight: 500;
+	--text-onx-caption: 13px;
+	--text-onx-caption--line-height: 18px;
+	--text-onx-caption--font-weight: 400;
+	/* Shape roles. Only the soft character is defined; see DESIGN.md. */
+	--radius-onx-sm: 6px;
+	--radius-onx-md: 10px;
+	--radius-onx-lg: 14px;
+}
+
+/*
+ * `text-onx-mono` is a utility rather than a `--text-*` theme token because
+ * Tailwind's type sub-tokens cover line-height, letter-spacing and weight but
+ * not font-family, and a monospace role without an actual monospace face
+ * silently renders in the UI font.
+ */
+@utility text-onx-mono {
+	font-family:
+		ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+	font-size: 13px;
+	line-height: 18px;
+	font-weight: 400;
+	font-variant-numeric: tabular-nums;
+}
+
+:root {
+	color-scheme: light;
+	/* KernelSU injects --window-inset-* through /internal/insets.css. There is
+	 * no --top-inset family; the safe-area chain is the only valid one. */
+	--onx-top-inset: var(--window-inset-top, env(safe-area-inset-top, 0px));
+	--onx-bottom-inset: var(
+		--window-inset-bottom,
+		env(safe-area-inset-bottom, 0px)
+	);
+	--onx-left-inset: var(--window-inset-left, env(safe-area-inset-left, 0px));
+	--onx-right-inset: var(--window-inset-right, env(safe-area-inset-right, 0px));
+	--onx-nav-height: 64px;
+	--onx-appbar-height: 56px;
+	--onx-ui-scale: 1;
+	--onx-duration-fast: 120ms;
+	--onx-duration-base: 200ms;
+	--onx-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+	--onx-hairline: 1px;
+}
+
+:root[data-theme="dark"] {
+	color-scheme: dark;
+	--color-onx-bg: #121212;
+	--color-onx-surface: #1a1a1a;
+	--color-onx-container: #242424;
+	--color-onx-container-high: #2e2e2e;
+	--color-onx-on: #ffffff;
+	--color-onx-muted: #a3a3a3;
+	--color-onx-disabled: #6b6b6b;
+	--color-onx-divider: #333333;
+	--color-onx-accent: #ffffff;
+	--color-onx-on-accent: #000000;
+	--color-onx-scrim: rgb(0 0 0 / 60%);
+	--color-onx-hairline-strong: rgb(255 255 255 / 14%);
+}
+
+:root[data-theme="amoled"] {
+	color-scheme: dark;
+	--color-onx-bg: #000000;
+	--color-onx-surface: #000000;
+	--color-onx-container: #0a0a0a;
+	--color-onx-container-high: #161616;
+	--color-onx-on: #ffffff;
+	--color-onx-muted: #9e9e9e;
+	--color-onx-disabled: #5e5e5e;
+	--color-onx-divider: #262626;
+	--color-onx-accent: #ffffff;
+	--color-onx-on-accent: #000000;
+	--color-onx-scrim: rgb(0 0 0 / 60%);
+	--color-onx-hairline-strong: rgb(255 255 255 / 14%);
+}
+
+/*
+ * Blocking page shown before React mounts when the WebView is too old, or when
+ * a release build has no host bridge.
+ */
+.onx-blocking {
+	position: absolute;
+	inset: 0;
+	box-sizing: border-box;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: 100dvh;
+	width: 100vw;
+	padding: var(--onx-top-inset) calc(var(--onx-right-inset) + 16px)
+		var(--onx-bottom-inset) calc(var(--onx-left-inset) + 16px);
+	background-color: var(--color-onx-bg);
+}
+
+.onx-blocking p {
+	width: 100%;
+	text-align: center;
+	color: var(--color-onx-muted);
+}
+
+/*
+ * Scroll containers hide their scrollbar.
+ *
+ * The WebUI is touch-first, where a scrollbar is a desktop affordance rather
+ * than a control, and the monochrome ramp has no colour available to make a
+ * native scrollbar sit quietly inside the design. Scrolling is unchanged.
+ *
+ * Hiding it also removes the one obvious hint that a list continues, so the
+ * scroll container must clip at a partial item: that is why a Dialog caps its
+ * own height and lets the list fill the remainder instead of capping the list.
+ */
+.onx-scroll {
+	overflow-y: auto;
+	scrollbar-width: none;
+	-ms-overflow-style: none;
+}
+
+.onx-scroll::-webkit-scrollbar {
+	width: 0;
+	height: 0;
+	display: none;
+}
+
+html {
+	background-color: var(--color-onx-bg);
+}
+
+body {
+	margin: 0;
+	background-color: var(--color-onx-bg);
+	color: var(--color-onx-on);
+	font-size: 16px;
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+	zoom: var(--onx-ui-scale);
+}
+
+/*
+ * Log panel rows. The Vue build colourised logcat by level — green for I,
+ * amber for W, red for E. The monochrome ramp cannot, so level is carried by
+ * weight, and the message itself is never muted by level alone: the message is
+ * what the user came to read.
+ */
+.onx-log-tag {
+	color: var(--color-onx-muted);
+}
+
+.onx-log-level {
+	font-weight: 500;
+}
+
+.onx-log-level-strong {
+	font-weight: 600;
+}
+
+.onx-log-message-muted {
+	color: var(--color-onx-muted);
+}
+
+.onx-log-empty {
+	color: var(--color-onx-muted);
+}
+
+/* Focus is a hairline ring, never a colour. */
+:focus-visible {
+	outline: var(--onx-hairline) solid var(--color-onx-on);
+	outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}

@@ -1,21 +1,31 @@
 {
-  "compilerOptions": {
-    "target": "ES2020",
-    "useDefineForClassFields": true,
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "verbatimModuleSyntax": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "noEmit": true,
-    "types": ["vite/client"]
-  },
-  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
+	"compilerOptions": {
+		"target": "es2022",
+		"module": "esnext",
+		"lib": ["ES2023", "DOM", "DOM.Iterable"],
+		"types": ["vite/client", "node", "unplugin-icons/types/react"],
+		"jsx": "react-jsx",
+		"moduleResolution": "bundler",
+		"verbatimModuleSyntax": true,
+		"moduleDetection": "force",
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"strict": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"noFallthroughCasesInSwitch": true,
+		"paths": {
+			"@/*": ["./src/*"],
+			"@components/*": ["./src/components/*"],
+			"@bridge/*": ["./src/bridge/*"]
+		}
+	},
+	"include": [
+		"src/**/*.ts",
+		"src/**/*.tsx",
+		"tests/site/**/*.ts",
+		"vite.config.ts",
+		"playwright.config.ts"
+	]
 }

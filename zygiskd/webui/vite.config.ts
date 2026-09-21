@@ -1,31 +1,31 @@
-// Vite configuration for the OnyxZygisk WebUI.
-//
-// The module ships the built `dist/` as the KernelSU `webroot/` directory,
-// which root manager apps (KernelSU / APatch / MMRL) load directly from their
-// WebView — there is no server and no network. Two settings matter:
-//
-//  * `base: './'` — all emitted asset/module URLs are relative, so the page
-//    works regardless of the path/scheme the host WebView resolves.
-//  * `modulePreload: false` — the previous (pre-Vue) version already relied on
-//    native ES modules + dynamic `import()` and is proven to work in the host
-//    WebViews; disabling Vite's module-preload links keeps the output as close
-//    to that proven shape as possible (no extra file:// fetches up front).
-//
-// The `test` block configures Vitest (unit tests run in jsdom).
-import { defineConfig } from "vitest/config";
-import vue from "@vitejs/plugin-vue";
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
+import Icons from "unplugin-icons/vite";
+import { defineConfig } from "vite";
 
 export default defineConfig({
-  base: "./",
-  plugins: [vue()],
-  build: {
-    target: "es2020",
-    outDir: "dist",
-    modulePreload: false,
-    assetsInlineLimit: 4096,
-  },
-  test: {
-    environment: "jsdom",
-    setupFiles: ["src/test/setup.ts"],
-  },
+	// KernelSU loads the page straight off the filesystem, so every emitted URL
+	// must be relative rather than rooted at "/".
+	base: "",
+	plugins: [
+		react(),
+		tailwindcss(),
+		Icons({ compiler: "jsx", jsx: "react", autoInstall: false }),
+	],
+	resolve: {
+		alias: {
+			"@": fileURLToPath(new URL("./src", import.meta.url)),
+			"@components": fileURLToPath(new URL("./src/components", import.meta.url)),
+			"@bridge": fileURLToPath(new URL("./src/bridge", import.meta.url)),
+		},
+	},
+	build: {
+		// The host WebView is Android System WebView, which tracks Chromium.
+		target: "chrome120",
+		cssTarget: "chrome120",
+		outDir: "dist",
+		emptyOutDir: true,
+		cssCodeSplit: false,
+	},
 });
