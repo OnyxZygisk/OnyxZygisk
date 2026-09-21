@@ -28,12 +28,13 @@ import { FnView } from "./views/FnView";
 import { GalleryView } from "./views/GalleryView";
 import { LogsView } from "./views/LogsView";
 import { ModulesView } from "./views/ModulesView";
-import { SettingsView } from "./views/SettingsView";
+import { SCALE_MAX, SCALE_MIN, SettingsView } from "./views/SettingsView";
 import { StatusView } from "./views/StatusView";
 
 export const APPEARANCE_MODES = ["auto", "light", "dark", "amoled"] as const;
 
 const THEME_KEY = "onx-appearance";
+const SCALE_KEY = "onx-ui-scale";
 const REFRESH_MS = 6000;
 const PAGE_IDS = ["status", "modules", "fn", "logs", "settings"] as const;
 
@@ -64,6 +65,18 @@ function readStoredAppearance(): string {
 	return "auto";
 }
 
+function readStoredScale(): number {
+	try {
+		const stored = Number(window.localStorage.getItem(SCALE_KEY));
+		if (Number.isFinite(stored) && stored >= SCALE_MIN && stored <= SCALE_MAX) {
+			return stored;
+		}
+	} catch {
+		// Storage is unavailable in some WebView configurations.
+	}
+	return 100;
+}
+
 function persist(key: string, value: string): void {
 	try {
 		window.localStorage.setItem(key, value);
@@ -75,6 +88,7 @@ function persist(key: string, value: string): void {
 export function App(): React.JSX.Element {
 	const [page, setPage] = useState(0);
 	const [appearance, setAppearance] = useState<string>(readStoredAppearance);
+	const [scale, setScale] = useState<number>(readStoredScale);
 	const [systemDark, setSystemDark] = useState(prefersDark);
 	const [snapshot, setSnapshot] = useState<SystemSnapshot>(EMPTY_SNAPSHOT);
 
@@ -93,6 +107,14 @@ export function App(): React.JSX.Element {
 		);
 		persist(THEME_KEY, appearance);
 	}, [appearance, systemDark]);
+
+	useEffect(() => {
+		document.documentElement.style.setProperty(
+			"--onx-ui-scale",
+			String(scale / 100),
+		);
+		persist(SCALE_KEY, String(scale));
+	}, [scale]);
 
 	const refresh = useCallback(async () => {
 		setSnapshot(await loadSystemState());
@@ -130,6 +152,8 @@ export function App(): React.JSX.Element {
 					theme={resolveTheme(appearance, systemDark)}
 					appearance={appearance}
 					onAppearanceChange={setAppearance}
+					scale={scale}
+					onScaleChange={setScale}
 				/>
 				<SnackbarHost />
 			</>
@@ -175,6 +199,8 @@ export function App(): React.JSX.Element {
 					<SettingsView
 						appearance={appearance}
 						onAppearanceChange={setAppearance}
+						scale={scale}
+						onScaleChange={setScale}
 						snapshot={snapshot}
 						onRefresh={refresh}
 						onNotify={notify}

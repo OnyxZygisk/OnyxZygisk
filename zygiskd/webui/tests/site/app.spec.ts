@@ -247,6 +247,38 @@ test.describe("settings", () => {
 		await expect(master).toBeEnabled();
 	});
 
+	// Regression: refactoring a setting row into a text-only subcomponent dropped
+	// the trailing slot, so the slider silently disappeared from the row. A prop
+	// that exists but is never rendered is invisible to the type checker.
+	test("renders the trailing slot of a setting row", async ({ page }) => {
+		await page.goto("/");
+		await gotoPage(page, "Settings");
+		const slider = main(page).getByRole("slider", {
+			name: "Interface scale",
+		});
+		await expect(slider).toBeVisible();
+		const width = await slider.evaluate((thumb) =>
+			Math.round(
+				thumb.parentElement?.parentElement?.getBoundingClientRect().width ?? 0,
+			),
+		);
+		expect(width).toBeGreaterThan(100);
+	});
+
+	test("adjusts the interface scale", async ({ page }) => {
+		await page.goto("/");
+		await gotoPage(page, "Settings");
+		const slider = main(page).getByRole("slider", {
+			name: "Interface scale",
+		});
+		const before = Number(await slider.getAttribute("aria-valuenow"));
+		await slider.focus();
+		await page.keyboard.press("ArrowLeft");
+		await expect
+			.poll(async () => Number(await slider.getAttribute("aria-valuenow")))
+			.toBeLessThan(before);
+	});
+
 	// Overlays own one history entry each, so the Android back gesture closes
 	// the topmost layer instead of leaving the WebUI.
 	test("closes the topmost dialog on the back gesture", async ({ page }) => {

@@ -112,10 +112,11 @@ Four levels, applied fill-first. Elevation is expressed by filling a container w
 `on-surface-disabled` is the one token WCAG lets below 4.5:1, and the exemption is narrow: it
 covers *inactive user interface components*. Two consequences follow.
 
-- **Never express disabled with `opacity`.** Opacity composites to a value neither the guard nor
+- **Never express disabled text with `opacity`.** Opacity composites text to a value neither the guard nor
   a reviewer can predict, and it also drops the text out of the exempt category as far as tooling
   is concerned, because there is nothing marking the element as inactive. Use the token, and mark
-  the element `disabled` or `aria-disabled`.
+  the element `disabled` or `aria-disabled`. A disabled *control surface* — the track of a switch,
+  the rail of a slider — may dim, because no one reads through it.
 - **An unavailable status value is not an inactive control.** "Not installed" is text the user must
   read, so it uses `on-surface-muted`.
 
@@ -259,6 +260,7 @@ point upward. A molecule may compose atoms; an atom never imports a molecule or 
 | `ProgressIndicator` | — | — | Circular (stroke ring) and linear (2 px track) |
 | `Badge` | `accent` or transparent | optional `hairline` | 20 px tall, `text-caption` |
 | `Switch` | track `container-high` → `accent` | `hairline` when off | Headless UI |
+| `Slider` | track `divider`, fill `accent` | — | Radix |
 
 **Molecules**
 
@@ -460,6 +462,11 @@ Automatic, Light, Night and Night (pure black). That is the same four-way set th
 exposed, and both the follow-the-system behaviour and the pure-black theme are worth keeping. The
 picker is a dialog rather than a `<select>`: the WebUI is touch-only, and a native dropdown
 inside a WebView renders as a desktop popup.
+
+**Interface scale is a slider, sized by its wrapper.** `--onx-ui-scale` is applied to the document
+and driven by a Radix slider in a setting row's trailing slot. The width lives on the wrapper, never
+on the slider: two width utilities in one class list are resolved by stylesheet order rather than by
+the order they are written, which collapsed the control to the thumb's 16 px and left no track.
 
 **One `ChoiceRow`, not one picker per setting.** Appearance and mount mode are the same control
 with different options, so they share a component. The earlier Vue build had a `<select>` per

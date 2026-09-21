@@ -69,6 +69,9 @@
 	<string name="settings_language_section">言語</string>
 	<string name="settings_language">言語</string>
 	<string name="settings_language_auto">システムに従う</string>
+	<string name="settings_interaction_section">操作</string>
+	<string name="settings_scale">表示スケール</string>
+	<string name="settings_scale_summary">画面全体の表示サイズを調整します</string>
 	<string name="settings_host_section">Zygisk ホスト</string>
 	<string name="settings_hotplug">ホットプラグ</string>
 	<string name="settings_hotplug_summary">オフの場合、保留中の更新は再起動後に適用されます</string>

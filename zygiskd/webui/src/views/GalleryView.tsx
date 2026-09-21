@@ -11,6 +11,7 @@ import { Card } from "../components/atoms/Card";
 import { Icon } from "../components/atoms/Icon";
 import { IconButton } from "../components/atoms/IconButton";
 import { ProgressIndicator } from "../components/atoms/ProgressIndicator";
+import { Slider } from "../components/atoms/Slider";
 import { Switch } from "../components/atoms/Switch";
 import { ChoiceRow } from "../components/molecules/ChoiceRow";
 import { NavigationBar } from "../components/molecules/NavigationBar";
@@ -60,12 +61,16 @@ export interface GalleryViewProps {
 	/** The stored preference, which may be `auto`. */
 	appearance: string;
 	onAppearanceChange: (mode: string) => void;
+	scale: number;
+	onScaleChange: (value: number) => void;
 }
 
 export function GalleryView({
 	theme,
 	appearance,
 	onAppearanceChange,
+	scale,
+	onScaleChange,
 }: GalleryViewProps) {
 	const [nav, setNav] = useState(0);
 	const [switched, setSwitched] = useState(true);
@@ -241,6 +246,23 @@ export function GalleryView({
 					/>
 					<SettingRowSeparator />
 					<SettingRow
+						title="Slider row"
+						summary={`Interface scale: ${scale}%`}
+						trailing={
+							<span className="flex w-32 items-center">
+								<Slider
+									aria-label="Interface scale"
+									value={scale}
+									min={80}
+									max={120}
+									step={5}
+									onChange={onScaleChange}
+								/>
+							</span>
+						}
+					/>
+					<SettingRowSeparator />
+					<SettingRow
 						title="Disabled row"
 						summary="Inert, and it says so."
 						disabled
@@ -278,6 +300,16 @@ export function GalleryView({
 					onChange={setSwitched}
 					aria-label="Raw switch"
 				/>
+				<span className="w-40">
+					<Slider
+						aria-label="Raw slider"
+						value={scale}
+						min={80}
+						max={120}
+						step={5}
+						onChange={onScaleChange}
+					/>
+				</span>
 			</div>
 
 			<SectionHeader>Log rows</SectionHeader>

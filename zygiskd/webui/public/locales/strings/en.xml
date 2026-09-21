@@ -69,6 +69,9 @@
 	<string name="settings_language_section">Language</string>
 	<string name="settings_language">Language</string>
 	<string name="settings_language_auto">Follow system</string>
+	<string name="settings_interaction_section">Interaction</string>
+	<string name="settings_scale">Interface scale</string>
+	<string name="settings_scale_summary">Adjust the overall display size</string>
 	<string name="settings_host_section">Zygisk host</string>
 	<string name="settings_hotplug">Hot-plug</string>
 	<string name="settings_hotplug_summary">When off, staged updates wait for a reboot</string>
