@@ -1,3 +1,14 @@
+## v1.09 - WebUI rebuilt on React, and a versionCode that finally moves
+
+*   **WebUI rebuilt from scratch on React 19 + Vite + Tailwind CSS 4**, replacing the Vue 3 frontend: a strictly monochrome design system (hierarchy from type, weight, hairlines, surface level and spacing, never from hue), five tabs (Status / Modules / FN / Logs / Settings), and a new interface-scale setting.
+*   The Status tab now leads the runtime section with one plain word — Working / Stopped / Checking / Installed, not running / Unknown — with the raw monitor rows underneath as the evidence, so a partially healthy system reads as exactly that instead of collapsing into one coloured badge.
+*   Added three build-time guards that scan the compiled output rather than the sources: no chromatic value can reach the stylesheet; every i18n key the sources use exists in `en.xml`; and the development bridge cannot reach a release bundle.
+*   Added Playwright behaviour and axe accessibility suites (light, dark and amoled), replacing Vitest.
+*   Module authors are credited in the WebUI About section.
+*   **Fixed the released `versionCode`**: the android job cloned shallowly, so `git rev-list HEAD --count` returned 1 and every release archive shipped `versionCode=4` (the v1.08 asset is literally named `OnyxZygisk-v1.08-4-ebae065-release.zip`). Root managers compare that value, so a release cut without the fix would have reported the same number as v1.08 and never been offered as an update.
+*   Fixed the android job aborting before compilation on the SDK package Google removed, by moving to `android-actions/setup-android@v4`.
+*   Fixed a `webuiBuild` input that declared `package-lock.json` while the project uses pnpm; Gradle validates declared inputs before running a task, so the module zip build would have failed.
+
 ## v1.08 - ReZygisk compatibility and Magisk FN modules
 
 * Added ReZygisk-compatible `SIGPIPE` protection for the daemon and companion processes.

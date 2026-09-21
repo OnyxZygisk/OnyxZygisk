@@ -17,7 +17,7 @@ val moduleId by extra("onyxzygisk")
 val moduleName by extra("OnyxZygisk")
 // Keep release archives distinguishable from earlier hot-plug builds so
 // root-manager/WebView caches cannot accidentally reuse an older binary.
-val verName by extra("v1.08")
+val verName by extra("v1.09")
 val verCode by extra(gitCommitCount + 3)
 val commitHash by extra(gitCommitHash)
 val minAPatchVersion by extra(10762)
