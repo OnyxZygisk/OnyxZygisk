@@ -13,6 +13,12 @@
 	<string name="common_not_available">Not available</string>
 	<string name="common_main_navigation">Main</string>
 	<string name="status_summary_section">Summary</string>
+	<string name="status_state">State</string>
+	<string name="status_checking">Checking</string>
+	<string name="status_working">Working</string>
+	<string name="status_stopped">Stopped</string>
+	<string name="status_installed_inactive">Installed, not running</string>
+	<string name="status_unknown">Unknown</string>
 	<string name="status_modules_count">Zygisk modules</string>
 	<string name="status_fn_count">FN nodes</string>
 	<string name="status_runtime_section">Runtime</string>

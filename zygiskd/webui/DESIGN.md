@@ -322,6 +322,20 @@ is wrong ("Monitor stopped", "Not installed"). A screen reader user receives the
 as a sighted one. This is the rule the previous Vue build's green/red/amber hero badge violated:
 "stopped" and "working" differed only by hue.
 
+**The overall state is a StatusField, not a badge.** The Runtime section leads with one plain word —
+Working / Stopped / Checking / Installed, not running / Unknown — and the per-fact rows underneath
+are the evidence for it. The word is for a reader who does not know what `tracing` or
+`not injected` mean; the rows are for one who does. It is derived by `deriveOverallState()` in the
+protocol layer rather than in the view, so the rules are unit-tested without a DOM.
+
+Two of those rules are load-bearing, and each has a test:
+
+- The `monitor` row is authoritative. A zygote that has not been injected yet only means no app has
+  forked since boot, so it must not read as *stopped* for the whole time between boot and the first
+  fork.
+- "not injected" contains "injected", so a negative form has to be excluded before the healthy forms
+  are looked for — otherwise a zygote that has simply not forked yet reads as *working*.
+
 **Status rows replace the old status hero**
 
 The Vue build pinned a collapsing hero to the top of the page and encoded the whole framework

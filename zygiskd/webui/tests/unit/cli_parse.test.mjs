@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
 	decodeBase64Utf8,
+	deriveOverallState,
 	formatVersion,
 	isValidModuleId,
 	parseLogLineCount,
@@ -81,6 +82,97 @@ describe("parseStatus", () => {
 	test("ignores rows outside any section", () => {
 		const parsed = parseStatus("noise\n@@modules\nnot a module row\n");
 		assert.deepEqual(parsed.modules, []);
+	});
+});
+
+describe("deriveOverallState", () => {
+	const stateOf = (keys, monitor) => ({
+		keys,
+		monitor: parseMonitor(monitor),
+		modules: [],
+		fns: [],
+	});
+
+	test("is still checking until the first load settles", () => {
+		assert.equal(deriveOverallState("loading", null), "checking");
+		assert.equal(deriveOverallState("error", null), "error");
+	});
+
+	test("reads a tracing monitor as working", () => {
+		const state = stateOf(
+			{ installed: "1", runtime: "1", daemon: "1" },
+			"\tmonitor: \t tracing\n\tzygote64:\t not injected\n",
+		);
+		assert.equal(deriveOverallState("ready", state), "working");
+	});
+
+	test("never reads a not-yet-injected zygote as working or stopped", () => {
+		// Between boot and the first fork every zygote looks like this, and it is
+		// not a failure — but it is not evidence of health either.
+		const state = stateOf(
+			{ installed: "1", runtime: "1" },
+			"\tzygote64:\t not injected\n",
+		);
+		const overall = deriveOverallState("ready", state);
+		assert.notEqual(overall, "stopped");
+		assert.notEqual(overall, "working");
+	});
+
+	test("weighs the live rows before falling back to the daemon", () => {
+		// With no rows at all, a running daemon is the only evidence available.
+		assert.equal(
+			deriveOverallState("ready", stateOf({ daemon: "1" }, "")),
+			"working",
+		);
+		// With a row present but nothing healthy in it, a running daemon alone
+		// does not promote the state: the monitor stays the authority.
+		assert.equal(
+			deriveOverallState(
+				"ready",
+				stateOf({ daemon: "1" }, "\tzygote64:\t not injected\n"),
+			),
+			"unknown",
+		);
+	});
+
+	test("reads a stopped or crashed monitor as stopped", () => {
+		assert.equal(
+			deriveOverallState(
+				"ready",
+				stateOf({ installed: "1" }, "\tmonitor: \t stopped\n"),
+			),
+			"stopped",
+		);
+		assert.equal(
+			deriveOverallState(
+				"ready",
+				stateOf(
+					{ installed: "1" },
+					"\tmonitor: \t tracing\n\tzygiskd64:\t crashed\n",
+				),
+			),
+			"stopped",
+		);
+	});
+
+	test("separates installed-but-not-running from unknown", () => {
+		assert.equal(
+			deriveOverallState(
+				"ready",
+				stateOf({ installed: "1", runtime: "0" }, ""),
+			),
+			"installed_inactive",
+		);
+		assert.equal(deriveOverallState("ready", stateOf({}, "")), "unknown");
+	});
+
+	test("ignores detail lines when deciding", () => {
+		// A detail line that merely mentions "running" is not a live status row.
+		const state = stateOf(
+			{ installed: "1", runtime: "0" },
+			"\tNote: running late\n",
+		);
+		assert.equal(deriveOverallState("ready", state), "installed_inactive");
 	});
 });
 

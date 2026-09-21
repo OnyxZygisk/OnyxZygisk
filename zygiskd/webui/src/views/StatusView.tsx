@@ -1,5 +1,11 @@
-import { formatVersion, type MonitorRow } from "../cli_parse";
+import {
+	deriveOverallState,
+	formatVersion,
+	type MonitorRow,
+	type OverallState,
+} from "../cli_parse";
 import { Card } from "../components/atoms/Card";
+import { Divider } from "../components/atoms/Divider";
 import { SectionHeader } from "../components/molecules/SectionHeader";
 import { SettingRow, SettingRowList } from "../components/molecules/SettingRow";
 import {
@@ -37,6 +43,34 @@ function toneOf(value: string | undefined): StatusTone {
  * Building the key by concatenation would hide all three from the i18n guard,
  * which can only see whole string literals.
  */
+/**
+ * The framework's state as one plain word, for someone who has never heard of
+ * "tracing" or "not injected". The tone still never carries the meaning alone:
+ * the word itself says what is happening.
+ */
+function overallLabel(overall: OverallState): {
+	value: string;
+	tone: StatusTone;
+} {
+	switch (overall) {
+		case "checking":
+			return { value: tr("status_checking", "Checking"), tone: "pending" };
+		case "error":
+			return { value: tr("common_error", "Error"), tone: "error" };
+		case "working":
+			return { value: tr("status_working", "Working"), tone: "normal" };
+		case "stopped":
+			return { value: tr("status_stopped", "Stopped"), tone: "error" };
+		case "installed_inactive":
+			return {
+				value: tr("status_installed_inactive", "Installed, not running"),
+				tone: "unavailable",
+			};
+		default:
+			return { value: tr("status_unknown", "Unknown"), tone: "unavailable" };
+	}
+}
+
 function mountModeLabel(mode: string): string {
 	const labels: Record<string, string> = {
 		revert: tr("settings_mount_mode_revert", "Revert only"),
@@ -60,6 +94,7 @@ export function StatusView({ snapshot }: StatusViewProps) {
 	const zygote64 = rowValue(state?.monitor, "zygote64");
 	const zygote32 = rowValue(state?.monitor, "zygote32");
 	const detail = (state?.monitor ?? []).filter((row) => row.label === null);
+	const overall = overallLabel(deriveOverallState(snapshot.status, state));
 
 	const absent = tr("common_not_available", "Not available");
 	const installed =
@@ -122,6 +157,17 @@ export function StatusView({ snapshot }: StatusViewProps) {
 			<SectionHeader>{tr("status_runtime_section", "Runtime")}</SectionHeader>
 			<div className="px-4">
 				<Card className="flex flex-col gap-4">
+					{/*
+					 * The headline first, then the evidence for it: the rows below
+					 * answer "what exactly is running", which is only useful once the
+					 * one-word answer above has told the reader what to look for.
+					 */}
+					<StatusField
+						label={tr("status_state", "State")}
+						value={overall.value}
+						tone={overall.tone}
+					/>
+					<Divider />
 					<StatusField
 						label={tr("status_monitor", "Monitor")}
 						value={monitor ?? absent}

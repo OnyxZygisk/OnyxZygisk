@@ -13,6 +13,12 @@
 	<string name="common_not_available">不可用</string>
 	<string name="common_main_navigation">主导航</string>
 	<string name="status_summary_section">概览</string>
+	<string name="status_state">整体状态</string>
+	<string name="status_checking">检查中</string>
+	<string name="status_working">工作中</string>
+	<string name="status_stopped">已停止</string>
+	<string name="status_installed_inactive">已安装但未运行</string>
+	<string name="status_unknown">未知</string>
 	<string name="status_modules_count">Zygisk 模块</string>
 	<string name="status_fn_count">FN 节点</string>
 	<string name="status_runtime_section">运行状态</string>

@@ -117,7 +117,14 @@ export function App(): React.JSX.Element {
 	}, [scale]);
 
 	const refresh = useCallback(async () => {
-		setSnapshot(await loadSystemState());
+		const next = await loadSystemState();
+		// A transient failure must not wipe facts that are still true: keep the
+		// last good state and let the error section name what just failed.
+		setSnapshot((previous) =>
+			next.status === "error" && previous.state !== null
+				? { ...next, state: previous.state }
+				: next,
+		);
 	}, []);
 
 	useEffect(() => {

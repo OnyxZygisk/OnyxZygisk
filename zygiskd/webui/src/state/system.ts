@@ -1,7 +1,7 @@
-import type { SystemState } from "../cli_parse";
+import type { StatusLevel, SystemState } from "../cli_parse";
 import { cli } from "./app";
 
-export type SystemStatus = "loading" | "ready" | "error";
+export type SystemStatus = StatusLevel;
 
 export interface SystemSnapshot {
 	status: SystemStatus;

@@ -13,6 +13,12 @@
 	<string name="common_not_available">利用できません</string>
 	<string name="common_main_navigation">メイン</string>
 	<string name="status_summary_section">概要</string>
+	<string name="status_state">状態</string>
+	<string name="status_checking">確認中</string>
+	<string name="status_working">稼働中</string>
+	<string name="status_stopped">停止</string>
+	<string name="status_installed_inactive">インストール済み・未稼働</string>
+	<string name="status_unknown">不明</string>
 	<string name="status_modules_count">Zygisk モジュール</string>
 	<string name="status_fn_count">FN ノード</string>
 	<string name="status_runtime_section">実行状態</string>

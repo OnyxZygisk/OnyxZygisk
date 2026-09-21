@@ -141,6 +141,7 @@ test.describe("Snackbar", () => {
 test.describe("StatusField", () => {
 	test("states the condition in text, not only in tone", async ({ page }) => {
 		await page.goto("/?gallery");
+		await expect(page.getByText("Working", { exact: true })).toBeVisible();
 		await expect(page.getByText("tracing", { exact: true })).toBeVisible();
 		await expect(page.getByText("Stopped", { exact: true })).toBeVisible();
 		await expect(

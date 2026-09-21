@@ -281,6 +281,7 @@ export function GalleryView({
 			<SectionHeader>Status tones</SectionHeader>
 			<div className="px-4">
 				<Card className="flex flex-col gap-4">
+					<StatusField label="State" value="Working" />
 					<StatusField label="Monitor" value="tracing" />
 					<StatusField label="Daemon" value="Stopped" tone="error" />
 					<StatusField label="Runtime" value="Checking" tone="pending" />

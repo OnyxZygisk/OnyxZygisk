@@ -24,7 +24,9 @@ test.describe("status", () => {
 
 	test("renders the runtime surface from the bridge", async ({ page }) => {
 		await page.goto("/");
-		for (const value of ["tracing", "running", "KernelSU", "v1.0"]) {
+		// "Working" is the plain-word summary a reader who does not know what
+		// "tracing" means actually needs; the raw rows below are the evidence.
+		for (const value of ["Working", "tracing", "running", "KernelSU", "v1.0"]) {
 			await expect(main(page).getByText(value, { exact: true })).toBeVisible();
 		}
 	});

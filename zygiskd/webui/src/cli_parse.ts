@@ -201,3 +201,71 @@ export function parseMonitor(text: string): MonitorRow[] {
 	}
 	return rows;
 }
+
+/** How a snapshot came back, once a load attempt has settled. */
+export type StatusLevel = "loading" | "ready" | "error";
+
+/**
+ * The framework's state in one plain word.
+ *
+ * The per-fact rows answer "what exactly is running". This answers "is it
+ * working" — the question someone who has never heard of `tracing` or
+ * `not injected` actually has. It lives here rather than in the view so the
+ * rules stay testable without a DOM.
+ */
+export type OverallState =
+	| "checking"
+	| "error"
+	| "working"
+	| "stopped"
+	| "installed_inactive"
+	| "unknown";
+
+export function deriveOverallState(
+	level: StatusLevel,
+	state: SystemState | null,
+): OverallState {
+	if (level === "loading") return "checking";
+	if (level === "error") return "error";
+	if (state === null) return "unknown";
+
+	// Only the labelled rows are live status; the rest are detail lines.
+	const rows = state.monitor.filter((row) => row.label !== null);
+	const installed = state.keys.installed === "1";
+	const runtimeReady = state.keys.runtime === "1";
+	const daemonRunning = state.keys.daemon === "1";
+
+	// No monitor rows at all: an older build, or a monitor that never started.
+	if (rows.length === 0) {
+		if (daemonRunning) return "working";
+		if (installed) return "installed_inactive";
+		return "unknown";
+	}
+
+	// The `monitor` row is authoritative for whether the framework is running.
+	const monitor = rows.find((row) => row.label === "monitor")?.value ?? "";
+	if (/stopped|exited/i.test(monitor)) return "stopped";
+	if (rows.some((row) => /crashed/i.test(row.value))) return "stopped";
+
+	/*
+	 * Tracing means the framework is up and watching, so it reads as working.
+	 * A zygote that has not been injected yet only means no app has forked since
+	 * boot; it must not water this down to "stopped" for the whole time between
+	 * boot and the first fork.
+	 */
+	if (/tracing/i.test(monitor)) return "working";
+	/*
+	 * Only a *positive* live row counts. "not injected" contains "injected", so
+	 * the negative forms have to be excluded before the healthy ones are looked
+	 * for, or a zygote that simply has not forked yet would read as working.
+	 */
+	const healthy = rows.some(
+		(row) =>
+			!/not injected|stopped|exited|crashed|invalid/i.test(row.value) &&
+			/tracing|injected|running/i.test(row.value),
+	);
+	if (healthy) return "working";
+
+	if (installed && !runtimeReady) return "installed_inactive";
+	return "unknown";
+}
