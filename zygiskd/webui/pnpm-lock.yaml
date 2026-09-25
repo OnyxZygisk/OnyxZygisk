@@ -31,8 +31,8 @@ importers:
         specifier: 2.5.14
         version: 2.5.14
       '@iconify-json/material-symbols':
-        specifier: ^1.2.92
-        version: 1.2.92
+        specifier: ^1.2.93
+        version: 1.2.93
       '@playwright/test':
         specifier: ^1.63.0
         version: 1.63.0
@@ -235,8 +235,8 @@ packages:
       react: ^18 || ^19 || ^19.0.0-rc
       react-dom: ^18 || ^19 || ^19.0.0-rc
 
-  '@iconify-json/material-symbols@1.2.92':
-    resolution: {integrity: sha512-8DQClJc/77mpdlpNiWyjGXpx81YZuoNklrWNe/6K2rJtLTPU/7kRA7F/F8l5Q0a5yFvNlWuMReGB0m4CQ8cepA==}
+  '@iconify-json/material-symbols@1.2.93':
+    resolution: {integrity: sha512-IfbpRixmEdeBrl2Bc+RtNZGb3NcTnMiPP4WausCParQYpIdezEYYbgMggJC1cYzm1q0f77p53t5tppy9PWsrvQ==}
 
   '@iconify/types@2.0.0':
     resolution: {integrity: sha512-+wluvCrRhXrhyOmRDJ3q8mux9JkKy5SJ/v8ol2tu4FVjyYvtEzkc/3pK15ET6RKg4b4w4BmTk1+gsCUhf21Ykg==}
@@ -1493,7 +1493,7 @@ snapshots:
       react-dom: 19.3.0(react@19.3.0)
       use-sync-external-store: 1.7.0(react@19.3.0)
 
-  '@iconify-json/material-symbols@1.2.92':
+  '@iconify-json/material-symbols@1.2.93':
     dependencies:
       '@iconify/types': 2.0.0
 
